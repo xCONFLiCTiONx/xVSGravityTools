@@ -24,8 +24,25 @@ export type TreeItemType = 'category' | 'repo' | 'empty';
 
 function runGit(cwd: string, args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
-        execFile('git', args, { cwd, timeout: 15000, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(stdout));
+        // Prevent background repo inspection from spawning persistent `git fsmonitor--daemon` processes
+        // or taking optional `.git/index.lock` locks across every scanned repository.
+        const safeArgs = ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args];
+        execFile('git', safeArgs, { cwd, timeout: 15000, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(stdout));
     });
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(limit, items.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+            const current = nextIndex++;
+            results[current] = await fn(items[current]);
+        }
+    });
+    await Promise.all(workers);
+    return results;
 }
 
 const remoteVisibilityCache = new Map<string, RepoVisibility>();
@@ -510,13 +527,13 @@ export class RepoScanner {
 
     public async refreshStatuses(repos: GitRepository[]): Promise<GitRepository[]> {
         const existingRepos = repos.filter(r => fs.existsSync(r.path));
-        return Promise.all(existingRepos.map(async r => {
+        return mapWithConcurrency(existingRepos, 4, async r => {
             if (!fs.existsSync(path.join(r.path, '.git'))) {
                 return { ...r, syncStatus: 'none' as SyncStatus, visibility: 'local' as RepoVisibility, remoteUrl: undefined };
             }
             const state = await inspectRepoState(r.path);
             return { ...r, syncStatus: state.syncStatus, visibility: state.visibility, remoteUrl: state.remoteUrl };
-        }));
+        });
     }
 
     private async scanDir(curr: string, base: string, depth: number, maxDepth: number, showBranch: boolean, results: GitRepository[], visited: Set<string>) {
@@ -675,17 +692,31 @@ export function activateGitRepoManager(context: vscode.ExtensionContext) {
     scanner.scanRepositories().then(r => provider.setRepositories(r));
 
     // Keep sync-status colors fresh (local git checks only, no network).
-    const statusTimer = setInterval(async () => {
-        if (vscode.window.state.focused) {
+    let statusRefreshInFlight = false;
+    let lastStatusRefreshAt = 0;
+    const refreshStatusesSafe = async (minIntervalMs = 0) => {
+        if (statusRefreshInFlight) return;
+        const now = Date.now();
+        if (minIntervalMs > 0 && now - lastStatusRefreshAt < minIntervalMs) return;
+        statusRefreshInFlight = true;
+        try {
             provider.pruneMissing();
             provider.setRepositories(await scanner.refreshStatuses(provider.getRepositories()));
+            lastStatusRefreshAt = Date.now();
+        } finally {
+            statusRefreshInFlight = false;
+        }
+    };
+
+    const statusTimer = setInterval(() => {
+        if (vscode.window.state.focused) {
+            void refreshStatusesSafe(30000);
         }
     }, 60000);
     context.subscriptions.push({ dispose: () => clearInterval(statusTimer) });
-    context.subscriptions.push(vscode.window.onDidChangeWindowState(async s => {
+    context.subscriptions.push(vscode.window.onDidChangeWindowState(s => {
         if (s.focused) {
-            provider.pruneMissing();
-            provider.setRepositories(await scanner.refreshStatuses(provider.getRepositories()));
+            void refreshStatusesSafe(15000);
         }
     }));
 

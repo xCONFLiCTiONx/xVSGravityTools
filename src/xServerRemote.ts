@@ -23,7 +23,7 @@ async function promptOpenXServerSettings(settingKey: string, label: string): Pro
 
 function runGit(cwd: string, args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
-        execFile('git', args, { cwd, windowsHide: true }, (error, stdout, stderr) => {
+        execFile('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true }, (error, stdout, stderr) => {
             if (error) {
                 reject(new Error((stderr || stdout || error.message).trim()));
                 return;

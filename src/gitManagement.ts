@@ -105,7 +105,7 @@ export class TemplateFetcher {
 
 function runGit(cwd: string, args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
-        execFile('git', args, { cwd, windowsHide: true }, (err, stdout, stderr) => {
+        execFile('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true }, (err, stdout, stderr) => {
             if (err) {
                 reject(new Error(stderr || stdout || err.message));
             } else {

@@ -16,12 +16,27 @@ function getGitActionsOutput(): vscode.OutputChannel {
 type RepoHealth = GitRepository & { ahead: number; behind: number; changes: number; hasUpstream: boolean; missingReadme: boolean; missingLicense: boolean; outdated?: number; hasBuild: boolean; hasTest: boolean; error?: string };
 type ProjectPort = { port: number; address: string; process: string };
 function run(cwd: string, command: string, args: string[], timeout = 120000): Promise<string> {
-    return execFileAsync(command, args, { cwd, timeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }).then(r => r.stdout);
+    const finalArgs = command === 'git' ? ['-c', 'core.fsmonitor=false', ...args] : args;
+    return execFileAsync(command, finalArgs, { cwd, timeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }).then(r => r.stdout);
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(limit, items.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+            const current = nextIndex++;
+            results[current] = await fn(items[current]);
+        }
+    });
+    await Promise.all(workers);
+    return results;
 }
 async function inspect(repo: GitRepository): Promise<RepoHealth> {
     const result: RepoHealth = { ...repo, ahead: 0, behind: 0, changes: 0, hasUpstream: false, missingReadme: true, missingLicense: true, hasBuild: false, hasTest: false };
     try {
-        const [status, files] = await Promise.all([run(repo.path, 'git', ['status', '--porcelain=v1', '-b']), fs.promises.readdir(repo.path)]);
+        const [status, files] = await Promise.all([run(repo.path, 'git', ['--no-optional-locks', 'status', '--porcelain=v1', '-b']), fs.promises.readdir(repo.path)]);
         const lines = status.split(/\r?\n/).filter(Boolean);
         result.changes = lines.slice(1).length;
         const header = lines[0] || '';
@@ -120,7 +135,7 @@ export class RepoCommandCenter {
         try {
             await this.refreshProject();
             const repos = await this.scanner.scanRepositories();
-            this.repos = (await Promise.all(repos.filter(r => r.syncStatus !== 'none').map(inspect))).sort((a,b) => (b.changes + b.behind + (b.missingReadme ? 1 : 0) + (b.missingLicense ? 1 : 0)) - (a.changes + a.behind + (a.missingReadme ? 1 : 0) + (a.missingLicense ? 1 : 0)) || a.name.localeCompare(b.name));
+            this.repos = (await mapWithConcurrency(repos.filter(r => r.syncStatus !== 'none'), 4, inspect)).sort((a,b) => (b.changes + b.behind + (b.missingReadme ? 1 : 0) + (b.missingLicense ? 1 : 0)) - (a.changes + a.behind + (a.missingReadme ? 1 : 0) + (a.missingLicense ? 1 : 0)) || a.name.localeCompare(b.name));
         } finally { this.busy = false; this.render(); }
     }
 
@@ -386,7 +401,7 @@ async function findProjectPorts(root: string): Promise<ProjectPort[]> {
 }
 function runGitWithOutput(cwd: string, args: string[], output: vscode.OutputChannel): Promise<void> {
     return new Promise((resolve, reject) => {
-        const child = spawn('git', args, { cwd, windowsHide: true });
+        const child = spawn('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true });
         child.stdout.setEncoding('utf8');
         child.stderr.setEncoding('utf8');
         child.stdout.on('data', chunk => output.append(String(chunk)));

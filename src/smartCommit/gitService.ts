@@ -14,7 +14,7 @@ export interface GitRepository {
 export class GitService {
   private async execGit(args: string[], cwd: string): Promise<string> {
     try {
-      const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 50 * 1024 * 1024 });
+      const { stdout } = await execFileAsync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true, maxBuffer: 50 * 1024 * 1024 });
       return stdout || '';
     } catch (err: any) {
       return err?.stdout || '';
