@@ -198,7 +198,7 @@ export class RepoCommandCenter {
           vscode.window.showInformationMessage(value ? 'API key saved securely.' : 'API key cleared.');
         }
         if (m.command === 'loadOllamaModels') {
-          await this.loadOllamaModels(false);
+          await this.loadOllamaModels(false, typeof m.url === 'string' ? m.url : undefined);
         }
         if (m.command === 'updateCommitSettings' && m.values) {
           const config = vscode.workspace.getConfiguration('smartCommit');
@@ -227,9 +227,10 @@ export class RepoCommandCenter {
     void this.refresh();
   }
 
-  private async loadOllamaModels(silent: boolean) {
+  private async loadOllamaModels(silent: boolean, overrideUrl?: string) {
     const config = vscode.workspace.getConfiguration('smartCommit');
-    const baseUrl = (config.get<string>('ollamaUrl', '') || '').trim().replace(/\/+$/, '');
+    const rawUrl = overrideUrl !== undefined ? overrideUrl : (config.get<string>('ollamaUrl', '') || '');
+    const baseUrl = rawUrl.trim().replace(/\/+$/, '');
     const selectedModel = (config.get<string>('ollamaModel', '') || '').trim();
     if (!baseUrl) {
       this.panel?.webview.postMessage({
@@ -1528,9 +1529,12 @@ export class RepoCommandCenter {
             </label>
             <label class="field">
               <span>Model</span>
-              <input id="ollamaModelInput" type="text" list="ollamaModelList" placeholder="Enter model name or load from endpoint">
-              <datalist id="ollamaModelList"></datalist>
-              <span class="field-hint">Type any model name or click Load Models to choose from <code>/v1/models</code>.</span>
+              <select id="ollamaModelSelect">
+                <option value="">None (built-in heuristic)</option>
+                <option value="__custom__">Custom model name…</option>
+              </select>
+              <input id="ollamaModelCustom" type="text" placeholder="Enter custom model name" hidden>
+              <span class="field-hint">Click Test &amp; load models to populate from <code>/v1/models</code>, or choose Custom to type a model name.</span>
             </label>
             <label class="field">
               <span>API Key <span id="apiKeyBadge" class="field-hint"></span></span>
@@ -1884,7 +1888,7 @@ function renderState(state) {
       document.getElementById('autoStageIfNone').checked = !!cs.autoStageIfNone;
       document.getElementById('fallbackToUnstaged').checked = !!cs.fallbackToUnstaged;
       document.getElementById('ollamaUrl').value = cs.ollamaUrl || '';
-      document.getElementById('ollamaModelInput').value = cs.ollamaModel || '';
+      renderModelOptions(ui.loadedModels || [], cs.ollamaModel || '');
       ui.settingsHydrated = true;
     }
   }
@@ -1986,6 +1990,36 @@ document.getElementById('startupCheck').onchange = e => api.postMessage({ comman
 document.getElementById('repoSearch').oninput = e => { ui.search = e.target.value; if (ui.state) renderReposTab(ui.state); };
 document.getElementById('repoSort').onchange = e => { ui.sort = e.target.value; if (ui.state) renderReposTab(ui.state); };
 
+function renderModelOptions(models, currentValue) {
+  const select = document.getElementById('ollamaModelSelect');
+  const customInput = document.getElementById('ollamaModelCustom');
+  const names = [...new Set((models || []).map(m => typeof m === 'string' ? m : m.name).filter(Boolean))];
+  if (currentValue && !names.includes(currentValue)) {
+    names.unshift(currentValue);
+  }
+  select.innerHTML =
+    '<option value="">None (built-in heuristic)</option>' +
+    names.map(name => '<option value="' + esc(name) + '">' + esc(name) + '</option>').join('') +
+    '<option value="__custom__">Custom model name…</option>';
+  select.value = currentValue || '';
+  customInput.hidden = true;
+}
+
+function getSelectedModel() {
+  const select = document.getElementById('ollamaModelSelect');
+  if (select.value === '__custom__') {
+    return document.getElementById('ollamaModelCustom').value.trim();
+  }
+  return select.value.trim();
+}
+
+document.getElementById('ollamaModelSelect').onchange = e => {
+  const customInput = document.getElementById('ollamaModelCustom');
+  const isCustom = e.target.value === '__custom__';
+  customInput.hidden = !isCustom;
+  if (isCustom) customInput.focus();
+};
+
 function saveCommitSettings() {
   api.postMessage({
     command: 'updateCommitSettings',
@@ -1997,7 +2031,7 @@ function saveCommitSettings() {
       autoStageIfNone: document.getElementById('autoStageIfNone').checked,
       fallbackToUnstaged: document.getElementById('fallbackToUnstaged').checked,
       ollamaUrl: document.getElementById('ollamaUrl').value.trim(),
-      ollamaModel: document.getElementById('ollamaModelInput').value.trim()
+      ollamaModel: getSelectedModel()
     }
   });
 }
@@ -2007,7 +2041,7 @@ document.getElementById('saveAiSettingsBtn').onclick = saveCommitSettings;
 document.getElementById('loadModelsBtn').onclick = () => {
   saveCommitSettings();
   document.getElementById('ollamaStatus').textContent = 'Querying /v1/models…';
-  api.postMessage({ command: 'loadOllamaModels' });
+  api.postMessage({ command: 'loadOllamaModels', url: document.getElementById('ollamaUrl').value.trim() });
 };
 document.getElementById('saveApiKeyBtn').onclick = () => {
   api.postMessage({ command: 'setOllamaApiKey', value: document.getElementById('ollamaApiKey').value });
@@ -2081,15 +2115,12 @@ window.addEventListener('message', event => {
     renderState(m.payload);
   }
   if (m.command === 'ollamaModels') {
-    const list = document.getElementById('ollamaModelList');
-    const input = document.getElementById('ollamaModelInput');
-    list.innerHTML = (m.models || []).map(model => '<option value="' + esc(model.name) + '"></option>').join('');
-    if (!input.value.trim() && m.selectedModel) {
-      input.value = m.selectedModel;
-    }
+    ui.loadedModels = m.models || [];
+    const current = getSelectedModel() || m.selectedModel || '';
+    renderModelOptions(ui.loadedModels, current);
     document.getElementById('ollamaStatus').textContent = m.error
       ? m.error
-      : 'Connected — ' + (m.models || []).length + ' model(s) available from /v1/models.';
+      : 'Connected — ' + ui.loadedModels.length + ' model(s) available from /v1/models.';
   }
 });
 
