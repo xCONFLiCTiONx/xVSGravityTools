@@ -150,6 +150,7 @@ export class RepoCommandCenter {
       vscode.ViewColumn.One,
       { enableScripts: true, retainContextWhenHidden: true }
     );
+    this.panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'assets', 'icon.png');
     this.panel.onDidDispose(() => {
       this.panel = undefined;
     });
