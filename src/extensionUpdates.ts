@@ -79,7 +79,7 @@ function updateInstalledExtensions(): Promise<void> {
 export async function activateExtensionUpdates(context: vscode.ExtensionContext): Promise<void> {
     const applySettingAndCheckVersion = async (): Promise<void> => {
         const enabled = vscode.workspace
-            .getConfiguration('xVSCodeTools.extensionUpdates')
+            .getConfiguration('xVSGravityTools.extensionUpdates')
             .get<boolean>('manage', true);
 
         if (!enabled) {
@@ -87,7 +87,7 @@ export async function activateExtensionUpdates(context: vscode.ExtensionContext)
                 await restoreAutoUpdate(context);
             } catch (error) {
                 void vscode.window.showErrorMessage(
-                    `xVSCodeTools could not restore extensions.autoUpdate: ${String(error)}`
+                    `xVSGravityTools could not restore extensions.autoUpdate: ${String(error)}`
                 );
             }
             return;
@@ -97,7 +97,7 @@ export async function activateExtensionUpdates(context: vscode.ExtensionContext)
             await enforceAutoUpdateOff(context);
         } catch (error) {
             void vscode.window.showErrorMessage(
-                `xVSCodeTools could not disable VS Code extension auto-updates: ${String(error)}`
+                `xVSGravityTools could not disable VS Code extension auto-updates: ${String(error)}`
             );
         }
 
@@ -105,7 +105,7 @@ export async function activateExtensionUpdates(context: vscode.ExtensionContext)
         const lastVersion = context.globalState.get<string>(LAST_VERSION_KEY);
 
         // Establish a baseline on first activation; do not update extensions just
-        // because xVSCodeTools was installed or enabled for the first time.
+        // because xVSGravityTools was installed or enabled for the first time.
         if (!lastVersion) {
             await context.globalState.update(LAST_VERSION_KEY, currentVersion);
             return;
@@ -119,18 +119,18 @@ export async function activateExtensionUpdates(context: vscode.ExtensionContext)
         // If the CLI fails, the next VS Code startup can retry.
 
         void vscode.window.showInformationMessage(
-            `VS Code updated to ${currentVersion}. xVSCodeTools is updating installed extensions...`
+            `VS Code updated to ${currentVersion}. xVSGravityTools is updating installed extensions...`
         );
 
         try {
             await updateInstalledExtensions();
             await context.globalState.update(LAST_VERSION_KEY, currentVersion);
             void vscode.window.showInformationMessage(
-                'xVSCodeTools finished checking for and installing extension updates.'
+                'xVSGravityTools finished checking for and installing extension updates.'
             );
         } catch (error) {
             void vscode.window.showErrorMessage(
-                `xVSCodeTools could not update extensions: ${String(error)}`
+                `xVSGravityTools could not update extensions: ${String(error)}`
             );
         }
     };
@@ -139,17 +139,17 @@ export async function activateExtensionUpdates(context: vscode.ExtensionContext)
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(event => {
-            if (event.affectsConfiguration('xVSCodeTools.extensionUpdates.manage')) {
+            if (event.affectsConfiguration('xVSGravityTools.extensionUpdates.manage')) {
                 void applySettingAndCheckVersion();
                 return;
             }
 
             if (event.affectsConfiguration('extensions.autoUpdate') &&
-                vscode.workspace.getConfiguration('xVSCodeTools.extensionUpdates').get<boolean>('manage', true)) {
+                vscode.workspace.getConfiguration('xVSGravityTools.extensionUpdates').get<boolean>('manage', true)) {
                 // Keep the global setting off while this manager is enabled.
                 void enforceAutoUpdateOff(context).catch(error => {
                     void vscode.window.showErrorMessage(
-                        `xVSCodeTools could not enforce extensions.autoUpdate = off: ${String(error)}`
+                        `xVSGravityTools could not enforce extensions.autoUpdate = off: ${String(error)}`
                     );
                 });
             }

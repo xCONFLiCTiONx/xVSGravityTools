@@ -9,9 +9,12 @@ import { activateSystemTools } from './systemTools';
 import { auditGlobalGitConfig } from './globalGitConfig';
 import { activateXServerRemote } from './xServerRemote';
 import { activateExtensionUpdates } from './extensionUpdates';
+import { disposeAllOwnedGitProcesses } from './gitProcess';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('xVSCodeTools is now active.');
+    console.log('xVSGravityTools is now active.');
+
+    context.subscriptions.push({ dispose: () => disposeAllOwnedGitProcesses() });
 
     activateExtensionUpdates(context);
 
@@ -30,4 +33,5 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export async function deactivate() {
+    disposeAllOwnedGitProcesses();
 }

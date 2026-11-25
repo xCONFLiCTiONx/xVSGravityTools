@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as https from 'https';
-import { execFile } from 'child_process';
+import { execGit } from './gitProcess';
 
 export interface GitignoreTemplateItem {
     name: string;
@@ -104,15 +104,7 @@ export class TemplateFetcher {
 }
 
 function runGit(cwd: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-        execFile('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true }, (err, stdout, stderr) => {
-            if (err) {
-                reject(new Error(stderr || stdout || err.message));
-            } else {
-                resolve(stdout);
-            }
-        });
-    });
+    return execGit(args, { cwd, timeoutMs: 30000 });
 }
 
 export function activateGitManagement(context: vscode.ExtensionContext) {
@@ -429,7 +421,7 @@ async function generateReadme(uri?: vscode.Uri): Promise<void> {
 
     const description = await vscode.window.showInputBox({
         prompt: 'Enter a brief description for this project',
-        value: `${projectName} - Created with xVSCodeTools`
+        value: `${projectName} - Created with xVSGravityTools`
     });
 
     const readmeContent = `# ${projectName}\n\n> ${description || 'Project description.'}\n\n## Table of Contents\n- [Features](#features)\n- [Prerequisites](#prerequisites)\n- [Installation](#installation)\n- [Usage](#usage)\n- [License](#license)\n\n## Features\n- 🚀 Fast and lightweight\n- ⚙️ Modular architecture\n- 🛠️ Developer friendly\n\n## Prerequisites\n- VS Code or modern development environment\n\n## Installation\n\`\`\`bash\n# Clone repository\ngit clone <repository-url>\ncd ${folderName}\n\`\`\`\n\n## Usage\n\`\`\`bash\n# Example execution\n\`\`\`\n\n## License\nThis project is licensed under the terms specified in the [LICENSE](LICENSE) file.\n`;
@@ -576,7 +568,7 @@ export function triggerDebouncedPreload(delayMs = 300): void {
         clearTimeout(preloadTimer);
     }
     preloadTimer = setTimeout(() => {
-        preloadIgnoredPaths().catch(err => console.error('[xVSCodeTools] Preload error:', err));
+        preloadIgnoredPaths().catch(err => console.error('[xVSGravityTools] Preload error:', err));
     }, delayMs);
 }
 
@@ -836,7 +828,7 @@ export async function addToGitignoreAndUntrack(uri?: vscode.Uri, uris?: vscode.U
             try {
                 await runGit(repoRoot, ['rm', '-r', '--cached', '-f', '--ignore-unmatch', '--', item.relPath]);
             } catch (err: any) {
-                console.warn(`[xVSCodeTools] Failed to run git rm --cached for ${item.relPath}:`, err);
+                console.warn(`[xVSGravityTools] Failed to run git rm --cached for ${item.relPath}:`, err);
             }
             totalProcessed++;
 
@@ -1032,7 +1024,7 @@ export async function removeFromGitignoreAndTrack(uri?: vscode.Uri, uris?: vscod
                 await runGit(repoRoot, ['add', '-f', '--', item.relPath]);
                 totalProcessed++;
             } catch (err: any) {
-                console.warn(`[xVSCodeTools] Failed to run git add for ${item.relPath}:`, err);
+                console.warn(`[xVSGravityTools] Failed to run git add for ${item.relPath}:`, err);
             }
 
             // Immediately remove from in-memory cache

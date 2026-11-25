@@ -43,24 +43,25 @@ export function registerOllamaManagement(context: vscode.ExtensionContext): vsco
 
     vscode.commands.registerCommand('smart-commit-generator.selectOllamaModel', async () => {
       const url = serverUrl();
-      if (!url) { vscode.window.showWarningMessage('Set the xServer Inference API URL in Commit Settings first.'); return; }
+      if (!url) { vscode.window.showWarningMessage('Set the Inference API URL in Commit Settings first.'); return; }
       const apiBase = url.endsWith('/v1') ? url : url + '/v1';
       try {
         const response = await fetch(apiBase + '/models', { headers: await authHeaders(context) });
         if (!response.ok) throw new Error(`HTTP ${response.status}: ${await readError(response)}`);
         const data = await response.json() as { data?: Array<{ id?: string }> };
         const models = [...new Set((data.data || []).map(model => model.id?.trim()).filter((id): id is string => !!id))].sort();
-        if (!models.length) throw new Error('The inference gateway returned no selectable models.');
-        const selected = await vscode.window.showQuickPick(models.map(id => ({ label: id, description: id === (vscode.workspace.getConfiguration('smartCommit').get<string>('ollamaModel', 'xAssistant')) ? 'Current model' : undefined })), {
-          title: 'Select xServer Model',
-          placeHolder: 'Choose any model exposed by the xServer inference gateway',
+        if (!models.length) throw new Error('The inference endpoint returned no selectable models.');
+        const currentModel = (vscode.workspace.getConfiguration('smartCommit').get<string>('ollamaModel', '') || '').trim();
+        const selected = await vscode.window.showQuickPick(models.map(id => ({ label: id, description: id === currentModel ? 'Current model' : undefined })), {
+          title: 'Select AI Model',
+          placeHolder: 'Choose any model exposed by your inference endpoint',
           matchOnDescription: true
         });
         if (!selected) return;
         await vscode.workspace.getConfiguration('smartCommit').update('ollamaModel', selected.label, vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage(`Smart Commit is using ${selected.label}.`);
       } catch (error) {
-        vscode.window.showErrorMessage(`Could not load xServer models: ${error instanceof Error ? error.message : String(error)}`);
+        vscode.window.showErrorMessage(`Could not load models: ${error instanceof Error ? error.message : String(error)}`);
       }
     })
   ];

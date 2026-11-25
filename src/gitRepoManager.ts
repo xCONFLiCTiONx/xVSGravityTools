@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
-import { execFile } from 'child_process';
 import { RepoCommandCenter } from './repoCommandCenter';
+import { execGit } from './gitProcess';
 
 /** synced = green, committed = yellow (committed but not synced), dirty = red (uncommitted changes), none = not a repo */
 export type SyncStatus = 'synced' | 'committed' | 'dirty' | 'none';
@@ -18,17 +18,16 @@ export interface GitRepository {
     syncStatus?: SyncStatus;
     visibility?: RepoVisibility;
     remoteUrl?: string;
+    ahead?: number;
+    behind?: number;
+    changes?: number;
+    hasUpstream?: boolean;
 }
 
 export type TreeItemType = 'category' | 'repo' | 'empty';
 
 function runGit(cwd: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-        // Prevent background repo inspection from spawning persistent `git fsmonitor--daemon` processes
-        // or taking optional `.git/index.lock` locks across every scanned repository.
-        const safeArgs = ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args];
-        execFile('git', safeArgs, { cwd, timeout: 15000, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(stdout));
-    });
+    return execGit(args, { cwd, timeoutMs: 15000, noOptionalLocks: true });
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -86,7 +85,7 @@ function httpsQuery(url: string, method: 'HEAD' | 'GET' = 'HEAD'): Promise<{ sta
                 timeout: 3000,
                 agent: false,
                 headers: {
-                    'User-Agent': 'xVSCodeTools/1.0',
+                    'User-Agent': 'xVSGravityTools/1.0',
                     'Accept': 'application/json, text/html;q=0.8'
                 }
             },
@@ -165,17 +164,30 @@ async function checkRemoteVisibility(remoteUrl: string): Promise<RepoVisibility>
     }
 }
 
-async function inspectRepoState(repoPath: string): Promise<{ syncStatus: SyncStatus; visibility: RepoVisibility; remoteUrl?: string }> {
+async function inspectRepoState(repoPath: string): Promise<{
+    syncStatus: SyncStatus;
+    visibility: RepoVisibility;
+    remoteUrl?: string;
+    ahead: number;
+    behind: number;
+    changes: number;
+    hasUpstream: boolean;
+}> {
     try {
         const out = await runGit(repoPath, ['status', '--porcelain=v1', '-b']);
         const lines = out.split(/\r?\n/).filter(Boolean);
         const header = lines[0] || '';
+        const changes = Math.max(0, lines.length - 1);
         const noCommits = header.startsWith('## No commits yet') || header.startsWith('## Initial commit on');
         const hasUpstream = header.includes('...');
-        const outOfSync = /\[(ahead|behind|gone)/.test(header);
+        const aheadMatch = header.match(/ahead (\d+)/);
+        const behindMatch = header.match(/behind (\d+)/);
+        const ahead = aheadMatch ? Number(aheadMatch[1] || 0) : 0;
+        const behind = behindMatch ? Number(behindMatch[1] || 0) : 0;
+        const outOfSync = ahead > 0 || behind > 0 || /\[gone\]/.test(header);
 
         let syncStatus: SyncStatus = 'synced';
-        if (lines.length > 1) {
+        if (changes > 0) {
             syncStatus = 'dirty';
         } else if (!hasUpstream || outOfSync || noCommits) {
             syncStatus = 'committed';
@@ -183,7 +195,7 @@ async function inspectRepoState(repoPath: string): Promise<{ syncStatus: SyncSta
 
         // If there are no commits yet, mark as Local
         if (noCommits) {
-            return { syncStatus, visibility: 'local' };
+            return { syncStatus, visibility: 'local', ahead, behind, changes, hasUpstream };
         }
 
         // Extract upstream remote name from "## branch...remote/branch"
@@ -202,21 +214,21 @@ async function inspectRepoState(repoPath: string): Promise<{ syncStatus: SyncSta
             }
         }
         if (!remoteUrl) {
-            return { syncStatus, visibility: 'local' };
+            return { syncStatus, visibility: 'local', ahead, behind, changes, hasUpstream };
         }
 
         // Check if committed and synced to a remote (either active upstream or existing remote tracking refs)
         if (!hasUpstream) {
             const remoteRefs = (await runGit(repoPath, ['for-each-ref', '--count=1', 'refs/remotes']).catch(() => '')).trim();
             if (!remoteRefs) {
-                return { syncStatus, visibility: 'local' };
+                return { syncStatus, visibility: 'local', ahead, behind, changes, hasUpstream };
             }
         }
 
         const visibility = await checkRemoteVisibility(remoteUrl);
-        return { syncStatus, visibility, remoteUrl };
+        return { syncStatus, visibility, remoteUrl, ahead, behind, changes, hasUpstream };
     } catch {
-        return { syncStatus: 'none', visibility: 'local' };
+        return { syncStatus: 'none', visibility: 'local', ahead: 0, behind: 0, changes: 0, hasUpstream: false };
     }
 }
 
@@ -257,19 +269,29 @@ export class RepoTreeItem extends vscode.TreeItem {
             const visibility = repo.visibility ?? 'local';
             const visLabel = VISIBILITY_LABEL[visibility];
             const hiddenPrefix = isHiddenItem ? '[Hidden] ' : '';
-            this.tooltip = `${hiddenPrefix}${repo.name} (${visLabel})\nPath: ${repo.path}${repo.branch ? `\nBranch: ${repo.branch}` : ''}${repo.remoteUrl ? `\nRemote: ${repo.remoteUrl}` : ''}\nVisibility: ${visLabel}\nStatus: ${STATUS_LABEL[status]}`;
+            const ahead = repo.ahead ?? 0;
+            const behind = repo.behind ?? 0;
+            const changes = repo.changes ?? 0;
+            const syncDetails: string[] = [];
+            if (behind > 0) syncDetails.push(`Incoming: ${behind} commit${behind === 1 ? '' : 's'} to pull`);
+            if (ahead > 0) syncDetails.push(`Outgoing: ${ahead} commit${ahead === 1 ? '' : 's'} to push`);
+            if (changes > 0) syncDetails.push(`Uncommitted: ${changes} file${changes === 1 ? '' : 's'}`);
+            this.tooltip = `${hiddenPrefix}${repo.name} (${visLabel})\nPath: ${repo.path}${repo.branch ? `\nBranch: ${repo.branch}` : ''}${repo.remoteUrl ? `\nRemote: ${repo.remoteUrl}` : ''}\nVisibility: ${visLabel}\nStatus: ${STATUS_LABEL[status]}${syncDetails.length ? `\n${syncDetails.join('\n')}` : ''}`;
             const descParts: string[] = [];
             if (isHiddenItem) descParts.push('Hidden');
+            if (behind > 0 && ahead > 0) descParts.push(`↓${behind} ↑${ahead}`);
+            else if (behind > 0) descParts.push(`↓${behind} pull`);
+            else if (ahead > 0) descParts.push(`↑${ahead} push`);
+            if (changes > 0) descParts.push(`${changes} mod`);
             descParts.push(visLabel);
             if (repo.branch) descParts.push(repo.branch);
-            if (repo.parentDir) descParts.push(repo.parentDir);
             this.description = descParts.join(' • ');
             if (isHiddenItem) {
                 this.contextValue = repo.isPinned ? 'repoItemHiddenPinned' : 'repoItemHidden';
             } else {
                 this.contextValue = repo.isPinned ? 'repoItemPinned' : 'repoItem';
             }
-            const icon = isHiddenItem ? 'eye-closed' : (status === 'none' ? 'folder' : (repo.isPinned ? 'star-full' : 'repo'));
+            const icon = isHiddenItem ? 'eye-closed' : (status === 'none' ? 'folder' : (behind > 0 || ahead > 0 ? 'sync' : (repo.isPinned ? 'star-full' : 'repo')));
             this.iconPath = new vscode.ThemeIcon(icon, isHiddenItem ? new vscode.ThemeColor('disabledForeground') : statusColor(status));
             this.command = {
                 command: 'gitRepoManager.handleTreeItemClick',
@@ -280,12 +302,14 @@ export class RepoTreeItem extends vscode.TreeItem {
             const isHiddenCat = label.startsWith('Hidden');
             this.contextValue = isHiddenCat ? 'categoryHiddenItem' : 'categoryItem';
             let catIcon = 'folder';
-            if (label.includes('Favorites')) {
+            if (label.startsWith('Needs Sync')) {
+                catIcon = 'sync';
+            } else if (label.includes('Favorites')) {
                 catIcon = 'star-full';
             } else if (isHiddenCat) {
                 catIcon = 'eye-closed';
             }
-            this.iconPath = new vscode.ThemeIcon(catIcon);
+            this.iconPath = new vscode.ThemeIcon(catIcon, label.startsWith('Needs Sync') ? new vscode.ThemeColor('charts.yellow') : undefined);
         } else {
             this.contextValue = 'emptyItem';
             this.iconPath = new vscode.ThemeIcon('info');
@@ -529,11 +553,35 @@ export class RepoScanner {
         const existingRepos = repos.filter(r => fs.existsSync(r.path));
         return mapWithConcurrency(existingRepos, 4, async r => {
             if (!fs.existsSync(path.join(r.path, '.git'))) {
-                return { ...r, syncStatus: 'none' as SyncStatus, visibility: 'local' as RepoVisibility, remoteUrl: undefined };
+                return { ...r, syncStatus: 'none' as SyncStatus, visibility: 'local' as RepoVisibility, remoteUrl: undefined, ahead: 0, behind: 0, changes: 0, hasUpstream: false };
             }
             const state = await inspectRepoState(r.path);
-            return { ...r, syncStatus: state.syncStatus, visibility: state.visibility, remoteUrl: state.remoteUrl };
+            return {
+                ...r,
+                syncStatus: state.syncStatus,
+                visibility: state.visibility,
+                remoteUrl: state.remoteUrl,
+                ahead: state.ahead,
+                behind: state.behind,
+                changes: state.changes,
+                hasUpstream: state.hasUpstream
+            };
         });
+    }
+
+    public async fetchAllRepositories(repos: GitRepository[]): Promise<{ fetched: number; failed: number }> {
+        const targets = repos.filter(r => fs.existsSync(path.join(r.path, '.git')) && (r.hasUpstream || r.remoteUrl));
+        let fetched = 0;
+        let failed = 0;
+        await mapWithConcurrency(targets, 4, async r => {
+            try {
+                await execGit(['fetch', '--prune'], { cwd: r.path, timeoutMs: 20000, maxBuffer: 5 * 1024 * 1024 });
+                fetched++;
+            } catch {
+                failed++;
+            }
+        });
+        return { fetched, failed };
     }
 
     private async scanDir(curr: string, base: string, depth: number, maxDepth: number, showBranch: boolean, results: GitRepository[], visited: Set<string>) {
@@ -628,6 +676,19 @@ export class RepoTreeProvider implements vscode.TreeDataProvider<RepoTreeItem> {
             const activeRepos = this.repos.filter(r => !ConfigManager.isHidden(r.path, r.name));
             const hiddenRepos = this.repos.filter(r => ConfigManager.isHidden(r.path, r.name));
 
+            const needsSync = activeRepos.filter(r => (r.behind ?? 0) > 0 || (r.ahead ?? 0) > 0 || (r.changes ?? 0) > 0 || r.syncStatus === 'dirty');
+            if (needsSync.length > 0) {
+                items.push(
+                    new RepoTreeItem(
+                        `Needs Sync (${needsSync.length})`,
+                        'category',
+                        vscode.TreeItemCollapsibleState.Expanded,
+                        undefined,
+                        needsSync.map(r => new RepoTreeItem(r.name, 'repo', vscode.TreeItemCollapsibleState.None, r, undefined, false))
+                    )
+                );
+            }
+
             const favs = activeRepos.filter(r => r.isPinned);
             if (favs.length > 0) {
                 items.push(
@@ -686,10 +747,84 @@ export function activateGitRepoManager(context: vscode.ExtensionContext) {
     }
     const provider = new RepoTreeProvider(context);
 
+    // Status bar indicator showing at-a-glance sync status for the active workspace and all tracked repos
+    const syncStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
+    syncStatusBar.command = 'gitRepoManager.openCommandCenter';
+    syncStatusBar.text = '$(sync) Checking repos...';
+    syncStatusBar.tooltip = 'Open Multi-Repository Command Center';
+    syncStatusBar.show();
+    context.subscriptions.push(syncStatusBar);
+
+    const updateSyncStatusBar = (repos: GitRepository[]) => {
+        const active = repos.filter(r => !ConfigManager.isHidden(r.path, r.name) && r.syncStatus !== 'none');
+        const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const normWs = wsPath ? path.resolve(wsPath).toLowerCase() : '';
+        const currentRepo = normWs ? active.find(r => path.resolve(r.path).toLowerCase() === normWs) : undefined;
+
+        const behindRepos = active.filter(r => (r.behind ?? 0) > 0);
+        const aheadRepos = active.filter(r => (r.ahead ?? 0) > 0);
+        const dirtyRepos = active.filter(r => (r.changes ?? 0) > 0 || r.syncStatus === 'dirty');
+        const needSyncRepos = active.filter(r => (r.behind ?? 0) > 0 || (r.ahead ?? 0) > 0);
+
+        const curBehind = currentRepo?.behind ?? 0;
+        const curAhead = currentRepo?.ahead ?? 0;
+        const curChanges = currentRepo?.changes ?? 0;
+
+        if (currentRepo && (curBehind > 0 || curAhead > 0)) {
+            const parts: string[] = [];
+            if (curBehind > 0) parts.push(`↓${curBehind}`);
+            if (curAhead > 0) parts.push(`↑${curAhead}`);
+            const extra = needSyncRepos.length > 1 ? ` (+${needSyncRepos.length - 1} repos)` : '';
+            syncStatusBar.text = `$(sync) Sync needed ${parts.join(' ')}${extra}`;
+            syncStatusBar.backgroundColor = curBehind > 0 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+        } else if (needSyncRepos.length > 0) {
+            const parts: string[] = [];
+            if (behindRepos.length > 0) parts.push(`↓${behindRepos.length}`);
+            if (aheadRepos.length > 0) parts.push(`↑${aheadRepos.length}`);
+            syncStatusBar.text = `$(sync) ${needSyncRepos.length} repo${needSyncRepos.length === 1 ? '' : 's'} need sync (${parts.join(' ')})`;
+            syncStatusBar.backgroundColor = behindRepos.length > 0 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+        } else if (currentRepo && curChanges > 0) {
+            syncStatusBar.text = `$(edit) ${curChanges} uncommitted${dirtyRepos.length > 1 ? ` (+${dirtyRepos.length - 1} repos)` : ''}`;
+            syncStatusBar.backgroundColor = undefined;
+        } else if (dirtyRepos.length > 0) {
+            syncStatusBar.text = `$(edit) ${dirtyRepos.length} repo${dirtyRepos.length === 1 ? '' : 's'} with changes`;
+            syncStatusBar.backgroundColor = undefined;
+        } else {
+            syncStatusBar.text = `$(check) ${active.length} repo${active.length === 1 ? '' : 's'} synced`;
+            syncStatusBar.backgroundColor = undefined;
+        }
+
+        const tipLines: string[] = ['**xVSGravityTools — Repository Sync Status**', ''];
+        if (currentRepo) {
+            const curState = curBehind || curAhead
+                ? `${curBehind ? `↓${curBehind} behind` : ''}${curBehind && curAhead ? ', ' : ''}${curAhead ? `↑${curAhead} ahead` : ''}`
+                : curChanges ? `${curChanges} uncommitted file(s)` : 'In sync';
+            tipLines.push(`Current workspace (**${currentRepo.name}**): ${curState}`);
+        }
+        tipLines.push(`Tracked repositories: ${active.length} total · ${behindRepos.length} to pull · ${aheadRepos.length} to push · ${dirtyRepos.length} dirty`);
+        if (needSyncRepos.length > 0) {
+            tipLines.push('', '**Needs Sync:**');
+            for (const r of needSyncRepos.slice(0, 8)) {
+                const flags = [r.behind ? `↓${r.behind}` : '', r.ahead ? `↑${r.ahead}` : ''].filter(Boolean).join(' ');
+                tipLines.push(`- ${r.name}: ${flags}`);
+            }
+            if (needSyncRepos.length > 8) tipLines.push(`- …and ${needSyncRepos.length - 8} more`);
+        }
+        tipLines.push('', '_Click to open Command Center_');
+        const md = new vscode.MarkdownString(tipLines.join('\n'));
+        md.isTrusted = true;
+        syncStatusBar.tooltip = md;
+    };
+
+    const setReposAndUpdateBar = (repos: GitRepository[]) => {
+        provider.setRepositories(repos);
+        updateSyncStatusBar(provider.getRepositories());
+    };
+
     vscode.window.createTreeView('gitRepoManagerView', { treeDataProvider: provider, showCollapseAll: true });
 
-    provider.setRepositories(scanner.getCachedRepos());
-    scanner.scanRepositories().then(r => provider.setRepositories(r));
+    setReposAndUpdateBar(scanner.getCachedRepos());
+    scanner.scanRepositories().then(r => setReposAndUpdateBar(r));
 
     // Keep sync-status colors fresh (local git checks only, no network).
     let statusRefreshInFlight = false;
@@ -701,7 +836,7 @@ export function activateGitRepoManager(context: vscode.ExtensionContext) {
         statusRefreshInFlight = true;
         try {
             provider.pruneMissing();
-            provider.setRepositories(await scanner.refreshStatuses(provider.getRepositories()));
+            setReposAndUpdateBar(await scanner.refreshStatuses(provider.getRepositories()));
             lastStatusRefreshAt = Date.now();
         } finally {
             statusRefreshInFlight = false;
@@ -903,15 +1038,39 @@ export function activateGitRepoManager(context: vscode.ExtensionContext) {
             await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Window,
-                    title: 'xVSCodeTools: Refreshing repositories...'
+                    title: 'xVSGravityTools: Refreshing repositories...'
                 },
                 async () => {
                     try {
                         remoteVisibilityCache.clear();
                         const freshRepos = await scanner.scanRepositories();
-                        provider.setRepositories(freshRepos);
+                        setReposAndUpdateBar(freshRepos);
                     } catch (err: any) {
                         console.error('Error refreshing repositories:', err);
+                    }
+                }
+            );
+        }),
+        vscode.commands.registerCommand('gitRepoManager.fetchAll', async () => {
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'xVSGravityTools: Checking remotes for incoming commits...'
+                },
+                async () => {
+                    try {
+                        const current = provider.getRepositories();
+                        const { fetched, failed } = await scanner.fetchAllRepositories(current);
+                        const refreshed = await scanner.refreshStatuses(current);
+                        setReposAndUpdateBar(refreshed);
+                        const behindCount = refreshed.filter(r => (r.behind ?? 0) > 0).length;
+                        const aheadCount = refreshed.filter(r => (r.ahead ?? 0) > 0).length;
+                        const msg = behindCount || aheadCount
+                            ? `Checked ${fetched} remote(s): ${behindCount} behind, ${aheadCount} ahead.${failed ? ` (${failed} failed)` : ''}`
+                            : `Checked ${fetched} remote(s): all tracked repositories are up to date.${failed ? ` (${failed} failed)` : ''}`;
+                        vscode.window.showInformationMessage(msg);
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to fetch remotes: ${err?.message || err}`);
                     }
                 }
             );

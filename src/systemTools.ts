@@ -8,7 +8,7 @@ let networkOutputChannel: vscode.OutputChannel | undefined;
 
 function getOutputChannel(): vscode.OutputChannel {
     if (!networkOutputChannel) {
-        networkOutputChannel = vscode.window.createOutputChannel('xVSCodeTools: Network Info');
+        networkOutputChannel = vscode.window.createOutputChannel('xVSGravityTools: Network Info');
     }
     return networkOutputChannel;
 }
@@ -35,7 +35,7 @@ async function checkInternetConnectivity(): Promise<void> {
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: 'xVSCodeTools: Checking Internet Connectivity...',
+            title: 'xVSGravityTools: Checking Internet Connectivity...',
             cancellable: false
         },
         async () => {
@@ -166,7 +166,7 @@ async function flushDnsCache(): Promise<void> {
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: 'xVSCodeTools: Flushing DNS Cache...',
+            title: 'xVSGravityTools: Flushing DNS Cache...',
             cancellable: false
         },
         () => {
@@ -200,7 +200,7 @@ async function showNetworkInfo(): Promise<void> {
     const channel = getOutputChannel();
     channel.clear();
     channel.appendLine(`=========================================`);
-    channel.appendLine(` xVSCodeTools Network Information Report`);
+    channel.appendLine(` xVSGravityTools Network Information Report`);
     channel.appendLine(` Generated: ${new Date().toLocaleString()}`);
     channel.appendLine(` Hostname:  ${os.hostname()}`);
     channel.appendLine(` Platform:  ${os.platform()} (${os.arch()})`);

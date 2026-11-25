@@ -142,7 +142,7 @@ async function addToPath(uri?: vscode.Uri): Promise<void> {
 
     if (scope.value === 'Machine') {
         // Only the helper process is elevated; VS Code remains unelevated.
-        const elevatedScript = `Add-Type -AssemblyName PresentationFramework; try { ${updateScript}; if ($alreadyPresent) { [System.Windows.MessageBox]::Show('That folder is already in the system PATH.', 'xVSCodeTools') | Out-Null } else { Add-Type -Namespace Native -Name EnvBroadcast -MemberDefinition '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'; [UIntPtr]$result = [UIntPtr]::Zero; [Native.EnvBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result) | Out-Null; [System.Windows.MessageBox]::Show('System PATH updated. New processes will use the updated PATH.', 'xVSCodeTools') | Out-Null } } catch { [System.Windows.MessageBox]::Show($_.Exception.Message, 'Could not update system PATH') | Out-Null; exit 1 }`;
+        const elevatedScript = `Add-Type -AssemblyName PresentationFramework; try { ${updateScript}; if ($alreadyPresent) { [System.Windows.MessageBox]::Show('That folder is already in the system PATH.', 'xVSGravityTools') | Out-Null } else { Add-Type -Namespace Native -Name EnvBroadcast -MemberDefinition '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'; [UIntPtr]$result = [UIntPtr]::Zero; [Native.EnvBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result) | Out-Null; [System.Windows.MessageBox]::Show('System PATH updated. New processes will use the updated PATH.', 'xVSGravityTools') | Out-Null } } catch { [System.Windows.MessageBox]::Show($_.Exception.Message, 'Could not update system PATH') | Out-Null; exit 1 }`;
         const encodedScript = Buffer.from(elevatedScript, 'utf16le').toString('base64');
         const launchScript = `Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-EncodedCommand','${encodedScript}')`;
         execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', launchScript], { windowsHide: true }, error => {
@@ -197,7 +197,7 @@ async function showFileMetadata(uri?: vscode.Uri): Promise<void> {
             `Created: ${new Date(stat.ctime).toLocaleString()}`,
             `Modified: ${new Date(stat.mtime).toLocaleString()}`
         ];
-        const channel = vscode.window.createOutputChannel('xVSCodeTools: File Metadata');
+        const channel = vscode.window.createOutputChannel('xVSGravityTools: File Metadata');
         channel.clear();
         channel.appendLine(details.join('\n'));
         channel.show(true);
@@ -289,7 +289,7 @@ async function copyFileHash(uri?: vscode.Uri): Promise<void> {
             await vscode.env.clipboard.writeText(sha1);
             vscode.window.showInformationMessage(`Copied SHA-1 to clipboard: ${sha1}`);
         } else if (choice === 'View All Hashes') {
-            const channel = vscode.window.createOutputChannel('xVSCodeTools: File Hashes');
+            const channel = vscode.window.createOutputChannel('xVSGravityTools: File Hashes');
             channel.clear();
             channel.appendLine(`File: ${targetUri.fsPath}`);
             channel.appendLine(`Size: ${formatBytes(buffer.length)} (${buffer.length} bytes)`);

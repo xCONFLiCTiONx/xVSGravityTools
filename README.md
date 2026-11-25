@@ -1,4 +1,4 @@
-# xVSCodeTools
+# xVSGravityTools
 
 An all-in-one Visual Studio Code extension that brings project, Git, file, script, browser-debugging, and network utilities into one Activity Bar sidebar.
 
@@ -29,7 +29,7 @@ All tools are active whenever the extension is active. Configure individual tool
 
 - Automatically disables VS Code's built-in extension auto-updates while management is enabled.
 - Checks the VS Code version at startup and runs one update pass for installed extensions only when the VS Code version has changed.
-- Enable or disable this behavior with **xVSCodeTools: Manage Extension Updates** in Settings (enabled by default).
+- Enable or disable this behavior with **xVSGravityTools: Manage Extension Updates** in Settings (enabled by default).
 - When disabled, restores the previous global `extensions.autoUpdate` value.
 
 ### Smart Commit Generator
@@ -38,9 +38,9 @@ All tools are active whenever the extension is active. Configure individual tool
 - Generate Conventional Commit, emoji, simple, and detailed styles; optionally include an inferred scope and a body listing changed files.
 - Choose whether to fall back to unstaged changes when nothing is staged, or automatically stage changes when none are staged.
 - Configure the default format and emoji style. Use the Source Control action or `Ctrl+Alt+G`; the command palette also offers **Generate Commit Message (Choose Style...)**.
-- Manage inference from the Command Center's **Commit settings** tab: refresh the xServer gateway model list, select any exposed model (including `xAssistant`), and set or clear an optional API key.
-- API keys are stored in VS Code SecretStorage and are not written to settings or source files.
-- The default commit model is `xAssistant`; model selection is dynamic and does not require a separate xVSCodeTools model profile.
+- Manage inference from the Command Center's **Settings** tab: configure your OpenAI-compatible inference API URL, load available models from `/v1/models`, select any exposed model, and set or clear an optional API key.
+- API keys are stored in VS Code / IDE SecretStorage and are not written to settings or source files.
+- If no inference URL or model is configured, Smart Commit automatically falls back to its built-in local heuristic generator.
 
 ### xScript Runner
 
@@ -99,7 +99,7 @@ npx @vscode/vsce package --no-dependencies --allow-missing-repository
 Then install the generated `.vsix` using **Extensions: Install from VSIX...** in VS Code, or:
 
 ```sh
-code --install-extension x-vscode-tools-1.0.0.vsix
+code --install-extension x-vsgravity-tools-1.0.0.vsix
 ```
 
 For development, open this folder in VS Code, install dependencies, and press `F5` to launch an Extension Development Host.

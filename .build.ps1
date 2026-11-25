@@ -1,12 +1,12 @@
 
-# xVSCodeTools Build Script
-# Installs dependencies, compiles, packages, and installs the VS Code extension.
+# xVSGravityTools Build Script
+# Installs dependencies, compiles, packages, and installs the IDE extension.
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Building xVSCodeTools Extension (.vsix)" -ForegroundColor Cyan
+Write-Host "Building xVSGravityTools Extension (.vsix)" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # Step 1: Install Dependencies
@@ -34,14 +34,30 @@ if (!(Test-Path $vsixPath)) {
 }
 
 # Step 4: Install Extension
-Write-Host "`n[4/4] Installing xVSCodeTools into VS Code..." -ForegroundColor Yellow
+Write-Host "`n[4/4] Installing xVSGravityTools into IDE..." -ForegroundColor Yellow
 
-if (!(Get-Command code -ErrorAction SilentlyContinue)) {
-    throw "VS Code CLI command 'code' was not found. The VSIX was packaged but could not be installed."
+$ideCli = $null
+$candidates = @(
+    "antigravity-ide",
+    "$env:LOCALAPPDATA\Programs\Antigravity IDE\bin\antigravity-ide.cmd",
+    "$env:ProgramFiles\Antigravity IDE\bin\antigravity-ide.cmd",
+    "code",
+    "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd",
+    "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd"
+)
+foreach ($candidate in $candidates) {
+    $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+    if ($cmd) { $ideCli = $cmd.Source; break }
+    if (Test-Path $candidate) { $ideCli = $candidate; break }
 }
 
-code --install-extension $vsixPath --force
-if ($LASTEXITCODE -ne 0) { throw "VS Code extension installation failed." }
+if (!$ideCli) {
+    throw "No supported IDE CLI ('antigravity-ide' or 'code') was found. The VSIX was packaged at $vsixPath but could not be installed."
+}
+
+Write-Host "Using CLI: $ideCli" -ForegroundColor DarkGray
+& $ideCli --install-extension $vsixPath --force
+if ($LASTEXITCODE -ne 0) { throw "Extension installation failed." }
 
 Write-Host "`n========================================" -ForegroundColor Green
 Write-Host "Build, packaging, and installation complete!" -ForegroundColor Green

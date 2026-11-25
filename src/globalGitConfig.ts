@@ -1,8 +1,6 @@
 import * as vscode from 'vscode';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { execGit } from './gitProcess';
 
-const execFileAsync = promisify(execFile);
 const RECOMMENDED: Array<{ key: string; value: string; reason: string }> = [
     { key: 'init.defaultBranch', value: 'main', reason: 'Use main as the default branch for new repositories' },
     { key: 'fetch.prune', value: 'true', reason: 'Remove stale remote tracking references on fetch' },
@@ -11,7 +9,7 @@ const RECOMMENDED: Array<{ key: string; value: string; reason: string }> = [
 ];
 
 async function git(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync('git', args, { maxBuffer: 1024 * 1024 });
+    const stdout = await execGit(args, { maxBuffer: 1024 * 1024, timeoutMs: 15000 });
     return stdout.trim();
 }
 

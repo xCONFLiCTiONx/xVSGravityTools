@@ -2,7 +2,7 @@
 set -euo pipefail
 clear
 
-MODEL="xVSCodeTools:committer-4b"
+MODEL="xVSGravityTools:committer-4b"
 BASE_MODEL="qwen3.5:4b-q4_K_M"
 OLLAMA_URL="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 WORK_DIR="$(mktemp -d)"

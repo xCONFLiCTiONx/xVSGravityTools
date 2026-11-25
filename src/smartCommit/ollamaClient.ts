@@ -26,7 +26,7 @@ const MAX_LINE_CHARS = 120;
 const MAX_FILE_LIST = 25;
 let aiOutput: vscode.OutputChannel | undefined;
 function getAiOutput(): vscode.OutputChannel {
-  if (!aiOutput) aiOutput = vscode.window.createOutputChannel('xVSCodeTools: Smart Commit AI');
+  if (!aiOutput) aiOutput = vscode.window.createOutputChannel('xVSGravityTools: Smart Commit AI');
   return aiOutput;
 }
 const SKIP_FILE = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|\.(map|min\.js|lock|png|jpg|jpeg|gif|ico|svg|vsix|zip)$|(^|\/)(build|dist|out|node_modules)\//i;
@@ -35,7 +35,7 @@ const SKIP_FILE = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|\.(map
 export function getOllamaSettings(): OllamaSettings | undefined {
   const config = vscode.workspace.getConfiguration('smartCommit');
   const url = (config.get<string>('ollamaUrl', '') || '').trim().replace(/\/+$/, '');
-  const model = (config.get<string>('ollamaModel', 'xAssistant') || 'xAssistant').trim();
+  const model = (config.get<string>('ollamaModel', '') || '').trim();
   return url && model ? { url, model } : undefined;
 }
 
@@ -163,7 +163,7 @@ export async function generateWithOllama(
       getAiOutput().appendLine(`[ERROR] ${reason} Using the built-in generator.`);
       return undefined;
     }
-    getAiOutput().appendLine(`[OK] xServer inference gateway returned a commit message (${data.usage?.completion_tokens ?? 'unknown'} generated tokens).`);
+    getAiOutput().appendLine(`[OK] Inference endpoint returned a commit message (${data.usage?.completion_tokens ?? 'unknown'} generated tokens).`);
 
     if (withBody) {
       const lines = message.split(/\r?\n/);

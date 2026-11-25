@@ -1,9 +1,6 @@
 import * as vscode from 'vscode';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { FileDiff, DiffAnalyzer } from './diffAnalyzer';
-
-const execFileAsync = promisify(execFile);
+import { execGit } from '../gitProcess';
 
 export interface GitRepository {
   rootUri: vscode.Uri;
@@ -14,7 +11,7 @@ export interface GitRepository {
 export class GitService {
   private async execGit(args: string[], cwd: string): Promise<string> {
     try {
-      const { stdout } = await execFileAsync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true, maxBuffer: 50 * 1024 * 1024 });
+      const stdout = await execGit(args, { cwd, maxBuffer: 50 * 1024 * 1024, timeoutMs: 30000 });
       return stdout || '';
     } catch (err: any) {
       return err?.stdout || '';

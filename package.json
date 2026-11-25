@@ -1,6 +1,6 @@
 {
-  "name": "x-vscode-tools",
-  "displayName": "xVSCodeTools",
+  "name": "x-vsgravity-tools",
+  "displayName": "xVSGravityTools",
   "description": "All-in-one VS Code toolkit combining Script Runner, Git Management, Git Repo Manager, HTML Chrome Debugger, and Smart Commit Generator.",
   "version": "1.0.0",
   "publisher": "xconflictionx",
@@ -111,6 +111,12 @@
         "title": "Refresh Repositories",
         "category": "Git Repo Manager",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gitRepoManager.fetchAll",
+        "title": "Check Remote Updates (Fetch All)",
+        "category": "Git Repo Manager",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "gitRepoManager.openSettings",
@@ -306,7 +312,7 @@
       },
       {
         "command": "smart-commit-generator.selectOllamaModel",
-        "title": "Select xServer Model...",
+        "title": "Select AI Model...",
         "category": "Smart Commit",
         "icon": "$(server)"
       },
@@ -326,7 +332,7 @@
     "submenus": [
       {
         "id": "xToolsMenu",
-        "label": "xVSCodeTools"
+        "label": "xVSGravityTools"
       },
       {
         "id": "xToolsFileMenu",
@@ -514,6 +520,11 @@
           "group": "navigation@3"
         },
         {
+          "command": "gitRepoManager.fetchAll",
+          "when": "view == gitRepoManagerView",
+          "group": "navigation@3.5"
+        },
+        {
           "command": "gitRepoManager.selectBaseDirectory",
           "when": "view == gitRepoManagerView",
           "group": "navigation@4"
@@ -617,7 +628,7 @@
     ],
     "configuration": {
       "type": "object",
-      "title": "xVSCodeTools",
+      "title": "xVSGravityTools",
       "properties": {
         "gitManagement.autoShowDiff": {
           "type": "boolean",
@@ -770,24 +781,24 @@
         "smartCommit.ollamaUrl": {
           "type": "string",
           "default": "",
-          "description": "Base URL of your OpenAI-compatible / xServer inference gateway (e.g. https://inference.example.com/v1)."
+          "description": "Base URL of your OpenAI-compatible inference API endpoint (e.g. https://inference.example.com/v1 or http://localhost:11434/v1)."
         },
         "smartCommit.ollamaModel": {
           "type": "string",
-          "default": "xAssistant",
-          "description": "Model exposed by the xServer inference gateway to use for commit messages. Defaults to xAssistant; any available model can be selected."
+          "default": "",
+          "description": "Model name exposed by your OpenAI-compatible inference endpoint to use for commit messages. Leave empty to use the built-in heuristic generator."
         },
-        "xVSCodeTools.xServer.host": {
+        "xVSGravityTools.xServer.host": {
           "type": "string",
           "default": "",
           "description": "Hostname or IP address of your xServer Git host (e.g. 192.168.1.50 or xserver)."
         },
-        "xVSCodeTools.xServer.gitRoot": {
+        "xVSGravityTools.xServer.gitRoot": {
           "type": "string",
           "default": "/srv/git",
           "description": "Root directory for bare Git repositories on xServer."
         },
-        "xVSCodeTools.xServer.adminTarget": {
+        "xVSGravityTools.xServer.adminTarget": {
           "type": "string",
           "default": "",
           "description": "SSH user@host target used for xServer repository administration (e.g. user@192.168.1.50)."
@@ -797,7 +808,7 @@
           "default": false,
           "description": "Automatically open the Multi-Repository Command Center when VS Code starts."
         },
-        "xVSCodeTools.extensionUpdates.manage": {
+        "xVSGravityTools.extensionUpdates.manage": {
           "type": "boolean",
           "default": true,
           "description": "Manage extension updates: disable VS Code automatic extension updates and update installed extensions only after VS Code itself is updated."

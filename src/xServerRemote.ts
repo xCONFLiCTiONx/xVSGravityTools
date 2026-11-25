@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
+import { execGit } from './gitProcess';
 
 function getXServerConfig(): { host: string; gitRoot: string; adminTarget: string } {
-    const config = vscode.workspace.getConfiguration('xVSCodeTools.xServer');
+    const config = vscode.workspace.getConfiguration('xVSGravityTools.xServer');
     const host = (config.get<string>('host') ?? '').trim();
     const gitRoot = ((config.get<string>('gitRoot') ?? '/srv/git').trim() || '/srv/git').replace(/\/+$/, '');
     const adminTarget = (config.get<string>('adminTarget') ?? '').trim();
@@ -22,15 +23,7 @@ async function promptOpenXServerSettings(settingKey: string, label: string): Pro
 }
 
 function runGit(cwd: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-        execFile('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true }, (error, stdout, stderr) => {
-            if (error) {
-                reject(new Error((stderr || stdout || error.message).trim()));
-                return;
-            }
-            resolve(stdout.trim());
-        });
-    });
+    return execGit(args, { cwd, timeoutMs: 30000 }).then(stdout => stdout.trim());
 }
 
 async function resolveTarget(uri?: vscode.Uri): Promise<string | undefined> {
@@ -116,7 +109,7 @@ export function activateXServerRemote(context: vscode.ExtensionContext): void {
 
             const { host, gitRoot } = getXServerConfig();
             if (!host) {
-                await promptOpenXServerSettings('xVSCodeTools.xServer.host', 'xServer host');
+                await promptOpenXServerSettings('xVSGravityTools.xServer.host', 'xServer host');
                 return;
             }
 
@@ -213,7 +206,7 @@ function runXServerAdmin(adminTarget: string, operation: '--list' | '--delete', 
 async function deleteXServerRepository(): Promise<void> {
     const { adminTarget, gitRoot } = getXServerConfig();
     if (!adminTarget) {
-        await promptOpenXServerSettings('xVSCodeTools.xServer.adminTarget', 'xServer admin SSH target');
+        await promptOpenXServerSettings('xVSGravityTools.xServer.adminTarget', 'xServer admin SSH target');
         return;
     }
 
@@ -271,7 +264,7 @@ async function deleteXServerRepository(): Promise<void> {
             `Deleted xServer repository "${selected.label}". Local files and other remotes were not changed.`
         );
         if (result && !result.includes(`DELETED ${selected.label}`)) {
-            console.log(`[xVSCodeTools] xServer repository deletion response: ${result}`);
+            console.log(`[xVSGravityTools] xServer repository deletion response: ${result}`);
         }
     } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
