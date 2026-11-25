@@ -70,32 +70,13 @@ async function inspect(repo: GitRepository): Promise<RepoHealth> {
     hasTest: false
   };
   try {
-    const [status, files] = await Promise.all([
-      run(repo.path, 'git', ['--no-optional-locks', 'status', '--porcelain=v1', '-b']),
-      fs.promises.readdir(repo.path)
-    ]);
-    const lines = status.split(/\r?\n/).filter(Boolean);
-    result.changes = Math.max(0, lines.length - 1);
-    const header = lines[0] || '';
-    result.hasUpstream = header.includes('...');
-    const aheadMatch = header.match(/ahead (\d+)/);
-    const behindMatch = header.match(/behind (\d+)/);
-    result.ahead = aheadMatch ? Number(aheadMatch[1] || 0) : 0;
-    result.behind = behindMatch ? Number(behindMatch[1] || 0) : 0;
+    const files = await fs.promises.readdir(repo.path);
     result.missingReadme = !files.some(f => /^readme(?:\.|$)/i.test(f));
     result.missingLicense = !files.some(f => /^licen[cs]e(?:\.|$)/i.test(f));
     if (files.includes('package.json')) {
       const pkg = JSON.parse(await fs.promises.readFile(path.join(repo.path, 'package.json'), 'utf8'));
       result.hasBuild = typeof pkg.scripts?.build === 'string';
       result.hasTest = typeof pkg.scripts?.test === 'string';
-      const outdated = await run(repo.path, 'npm', ['outdated', '--json'], 30000).catch(e =>
-        typeof e.stdout === 'string' ? e.stdout : '{}'
-      );
-      try {
-        result.outdated = Object.keys(JSON.parse(outdated || '{}')).length;
-      } catch {
-        result.outdated = 0;
-      }
     }
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
@@ -123,13 +104,39 @@ export class RepoCommandCenter {
   private projectErrors: { file: string; line: number; message: string }[] = [];
   private projectPorts: ProjectPort[] = [];
   private busy = false;
+  private pendingRefresh = false;
   private fetchingRemotes = false;
   private syncingPaths = new Set<string>();
   private lastCheckedAt?: string;
+  private lastCheckedMs = 0;
   private lastFetchedAt?: string;
   private ollamaKeyConfigured = false;
+  private onReposUpdated?: (repos: GitRepository[]) => void;
 
-  constructor(private context: vscode.ExtensionContext, private scanner: RepoScanner) { }
+  constructor(
+    private context: vscode.ExtensionContext,
+    private scanner: RepoScanner,
+    onReposUpdated?: (repos: GitRepository[]) => void
+  ) {
+    this.onReposUpdated = onReposUpdated;
+  }
+
+  public setOnReposUpdated(cb: (repos: GitRepository[]) => void) {
+    this.onReposUpdated = cb;
+  }
+
+  public async syncFromExternalRepos(repos: GitRepository[]) {
+    if (!this.panel || this.busy) return;
+    const inspected = await mapWithConcurrency(
+      repos.filter(r => r.syncStatus !== 'none'),
+      8,
+      inspect
+    );
+    this.repos = inspected.sort((a, b) => repoPriorityScore(b) - repoPriorityScore(a) || a.name.localeCompare(b.name));
+    this.lastCheckedMs = Date.now();
+    this.lastCheckedAt = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    this.postState();
+  }
 
   open() {
     if (this.panel) {
@@ -145,6 +152,11 @@ export class RepoCommandCenter {
     );
     this.panel.onDidDispose(() => {
       this.panel = undefined;
+    });
+    this.panel.onDidChangeViewState(e => {
+      if (e.webviewPanel.visible && Date.now() - this.lastCheckedMs > 10000) {
+        void this.refresh();
+      }
     });
 
     this.panel.webview.html = this.buildShellHtml();
@@ -303,25 +315,38 @@ export class RepoCommandCenter {
     });
   }
 
-  private async refresh() {
-    if (!this.panel || this.busy) return;
+  public async refresh() {
+    if (!this.panel) return;
+    if (this.busy) {
+      this.pendingRefresh = true;
+      return;
+    }
     this.busy = true;
+    this.pendingRefresh = false;
     this.postState();
     try {
-      await this.refreshProject();
+      const projectPromise = this.refreshProject().catch(() => {});
       const repos = await this.scanner.scanRepositories();
+      this.onReposUpdated?.(repos);
       const inspected = await mapWithConcurrency(
         repos.filter(r => r.syncStatus !== 'none'),
-        4,
+        8,
         inspect
       );
       this.repos = inspected.sort((a, b) => repoPriorityScore(b) - repoPriorityScore(a) || a.name.localeCompare(b.name));
+      this.lastCheckedMs = Date.now();
       this.lastCheckedAt = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      this.postState();
+      await projectPromise;
     } catch (err) {
       vscode.window.showErrorMessage(`Command Center refresh failed: ${errorText(err)}`);
     } finally {
       this.busy = false;
       this.postState();
+      if (this.pendingRefresh && this.panel) {
+        this.pendingRefresh = false;
+        void this.refresh();
+      }
     }
   }
 

@@ -551,13 +551,23 @@ export class RepoScanner {
 
     public async refreshStatuses(repos: GitRepository[]): Promise<GitRepository[]> {
         const existingRepos = repos.filter(r => fs.existsSync(r.path));
-        return mapWithConcurrency(existingRepos, 4, async r => {
-            if (!fs.existsSync(path.join(r.path, '.git'))) {
+        const showBranch = ConfigManager.getShowGitBranch();
+        return mapWithConcurrency(existingRepos, 8, async r => {
+            const gitPath = path.join(r.path, '.git');
+            if (!fs.existsSync(gitPath)) {
                 return { ...r, syncStatus: 'none' as SyncStatus, visibility: 'local' as RepoVisibility, remoteUrl: undefined, ahead: 0, behind: 0, changes: 0, hasUpstream: false };
+            }
+            let branch = r.branch;
+            if (showBranch) {
+                try {
+                    const head = fs.readFileSync(path.join(gitPath, 'HEAD'), 'utf8').trim();
+                    branch = head.startsWith('ref: refs/heads/') ? head.substring(16) : undefined;
+                } catch {}
             }
             const state = await inspectRepoState(r.path);
             return {
                 ...r,
+                branch,
                 syncStatus: state.syncStatus,
                 visibility: state.visibility,
                 remoteUrl: state.remoteUrl,
@@ -816,10 +826,15 @@ export function activateGitRepoManager(context: vscode.ExtensionContext) {
         syncStatusBar.tooltip = md;
     };
 
-    const setReposAndUpdateBar = (repos: GitRepository[]) => {
+    const setReposAndUpdateBar = (repos: GitRepository[], syncCommandCenter = true) => {
         provider.setRepositories(repos);
         updateSyncStatusBar(provider.getRepositories());
+        if (syncCommandCenter) {
+            void commandCenter.syncFromExternalRepos(repos);
+        }
     };
+
+    commandCenter.setOnReposUpdated(repos => setReposAndUpdateBar(repos, false));
 
     vscode.window.createTreeView('gitRepoManagerView', { treeDataProvider: provider, showCollapseAll: true });
 
@@ -1042,7 +1057,6 @@ export function activateGitRepoManager(context: vscode.ExtensionContext) {
                 },
                 async () => {
                     try {
-                        remoteVisibilityCache.clear();
                         const freshRepos = await scanner.scanRepositories();
                         setReposAndUpdateBar(freshRepos);
                     } catch (err: any) {
