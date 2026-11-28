@@ -579,16 +579,25 @@ export class RepoScanner {
         });
     }
 
-    public async fetchAllRepositories(repos: GitRepository[]): Promise<{ fetched: number; failed: number }> {
+    public async fetchAllRepositories(
+        repos: GitRepository[],
+        onProgress?: (completed: number, total: number, repoName: string) => void
+    ): Promise<{ fetched: number; failed: number }> {
         const targets = repos.filter(r => fs.existsSync(path.join(r.path, '.git')) && (r.hasUpstream || r.remoteUrl));
         let fetched = 0;
         let failed = 0;
+        let completed = 0;
+        const total = targets.length;
+        onProgress?.(0, total, '');
         await mapWithConcurrency(targets, 4, async r => {
             try {
                 await execGit(['fetch', '--prune'], { cwd: r.path, timeoutMs: 20000, maxBuffer: 5 * 1024 * 1024 });
                 fetched++;
             } catch {
                 failed++;
+            } finally {
+                completed++;
+                onProgress?.(completed, total, r.name);
             }
         });
         return { fetched, failed };
@@ -1069,14 +1078,26 @@ export function activateGitRepoManager(context: vscode.ExtensionContext) {
             await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
-                    title: 'xVSGravityTools: Checking remotes for incoming commits...'
+                    title: 'xVSGravityTools: Checking remotes'
                 },
-                async () => {
+                async (progress) => {
                     try {
                         const current = provider.getRepositories();
-                        const { fetched, failed } = await scanner.fetchAllRepositories(current);
+                        let lastPct = 0;
+                        const { fetched, failed } = await scanner.fetchAllRepositories(current, (done, total, repoName) => {
+                            if (total <= 0) return;
+                            const pct = Math.round((done / total) * 90);
+                            const inc = Math.max(0, pct - lastPct);
+                            lastPct = pct;
+                            progress.report({
+                                increment: inc,
+                                message: repoName ? `${done}/${total} · ${repoName}` : `Fetching ${total} repositories...`
+                            });
+                        });
+                        progress.report({ increment: Math.max(0, 95 - lastPct), message: 'Updating repository statuses...' });
                         const refreshed = await scanner.refreshStatuses(current);
                         setReposAndUpdateBar(refreshed);
+                        progress.report({ increment: 5, message: 'Done' });
                         const behindCount = refreshed.filter(r => (r.behind ?? 0) > 0).length;
                         const aheadCount = refreshed.filter(r => (r.ahead ?? 0) > 0).length;
                         const msg = behindCount || aheadCount

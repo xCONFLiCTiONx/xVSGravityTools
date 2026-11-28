@@ -31,6 +31,28 @@ type RepoHealth = GitRepository & {
 
 type ProjectPort = { port: number; address: string; process: string };
 
+type ProgressAction =
+  | 'refresh'
+  | 'fetchAll'
+  | 'syncAll'
+  | 'commitAll'
+  | 'pushAll'
+  | 'syncRepo'
+  | 'refreshProject'
+  | 'loadModels'
+  | 'fix';
+
+type ProgressState = {
+  active: boolean;
+  action: ProgressAction | null;
+  label: string;
+  detail?: string;
+  current?: number;
+  total?: number;
+  percent?: number;
+  tone?: 'accent' | 'info' | 'ok' | 'warn' | 'bad';
+};
+
 function run(cwd: string, command: string, args: string[], timeout = 120000): Promise<string> {
   if (command === 'git') {
     return execGit(args, { cwd, timeoutMs: timeout });
@@ -106,7 +128,11 @@ export class RepoCommandCenter {
   private busy = false;
   private pendingRefresh = false;
   private fetchingRemotes = false;
+  private batchActionInFlight: ProgressAction | null = null;
   private syncingPaths = new Set<string>();
+  private activePathLabels = new Map<string, string>();
+  private progress: ProgressState | null = null;
+  private progressClearTimer?: ReturnType<typeof setTimeout>;
   private lastCheckedAt?: string;
   private lastCheckedMs = 0;
   private lastFetchedAt?: string;
@@ -152,6 +178,10 @@ export class RepoCommandCenter {
     );
     this.panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'assets', 'icon.png');
     this.panel.onDidDispose(() => {
+      if (this.progressClearTimer) {
+        clearTimeout(this.progressClearTimer);
+        this.progressClearTimer = undefined;
+      }
       this.panel = undefined;
     });
     this.panel.onDidChangeViewState(e => {
@@ -187,16 +217,42 @@ export class RepoCommandCenter {
           await this.runScript(m.path, m.script);
         }
         if (m.command === 'fix' && typeof m.path === 'string') {
-          await vscode.commands.executeCommand(
-            m.issue === 'readme' ? 'git-management.generateReadme' : 'git-management.addLicense',
-            vscode.Uri.file(m.path)
-          );
-          await this.refresh();
+          const fixName = m.issue === 'readme' ? 'README' : 'License';
+          const repoName = path.basename(m.path);
+          this.syncingPaths.add(m.path);
+          this.activePathLabels.set(m.path, `Adding ${fixName}…`);
+          this.setProgress({
+            action: 'fix',
+            label: `Adding ${fixName}…`,
+            detail: repoName
+          });
+          this.postState();
+          try {
+            await vscode.commands.executeCommand(
+              m.issue === 'readme' ? 'git-management.generateReadme' : 'git-management.addLicense',
+              vscode.Uri.file(m.path)
+            );
+            this.setProgress({
+              action: 'fix',
+              label: `Refreshing repositories…`,
+              detail: repoName,
+              percent: 90
+            });
+            await this.refresh(true);
+            this.completeProgress('fix', `Updated ${fixName} for ${repoName}`, 'ok');
+          } catch (fixErr) {
+            this.completeProgress('fix', `Failed to add ${fixName}`, 'bad', errorText(fixErr));
+            throw fixErr;
+          } finally {
+            this.syncingPaths.delete(m.path);
+            this.activePathLabels.delete(m.path);
+            this.postState();
+          }
         }
         if (m.command === 'commitAll') await this.commitAll();
         if (m.command === 'pushAll') await this.pushAll();
         if (m.command === 'syncRepo' && typeof m.path === 'string') await this.syncByPath(m.path);
-        if (m.command === 'refreshProject') await this.refreshProject();
+        if (m.command === 'refreshProject') await this.refreshProject(true);
         if (m.command === 'updateStartupSetting') {
           const config = vscode.workspace.getConfiguration('gitRepoManager');
           await config.update('showCommandCenterOnStartup', !!m.value, vscode.ConfigurationTarget.Global);
@@ -240,6 +296,31 @@ export class RepoCommandCenter {
     void this.refresh();
   }
 
+  private setProgress(state: Omit<ProgressState, 'active'>) {
+    if (this.progressClearTimer) {
+      clearTimeout(this.progressClearTimer);
+      this.progressClearTimer = undefined;
+    }
+    this.progress = { active: true, tone: 'accent', ...state };
+    this.panel?.webview.postMessage({ command: 'progress', payload: this.progress });
+  }
+
+  private completeProgress(action: ProgressAction, label: string, tone: 'ok' | 'warn' | 'bad' = 'ok', detail?: string) {
+    if (this.progressClearTimer) {
+      clearTimeout(this.progressClearTimer);
+      this.progressClearTimer = undefined;
+    }
+    this.progress = { active: false, action, label, detail, percent: 100, tone };
+    this.panel?.webview.postMessage({ command: 'progress', payload: this.progress });
+    this.progressClearTimer = setTimeout(() => {
+      this.progressClearTimer = undefined;
+      if (this.progress && !this.progress.active) {
+        this.progress = null;
+        this.panel?.webview.postMessage({ command: 'progress', payload: null });
+      }
+    }, 2400);
+  }
+
   private async loadOllamaModels(silent: boolean, overrideUrl?: string) {
     const config = vscode.workspace.getConfiguration('smartCommit');
     const rawUrl = overrideUrl !== undefined ? overrideUrl : (config.get<string>('ollamaUrl', '') || '');
@@ -255,6 +336,9 @@ export class RepoCommandCenter {
       return;
     }
     const apiBase = baseUrl.endsWith('/v1') ? baseUrl : baseUrl + '/v1';
+    if (!silent) {
+      this.setProgress({ action: 'loadModels', label: 'Loading AI models…', detail: apiBase + '/models' });
+    }
     const key = await this.context.secrets.get('smartCommit.ollamaApiKey');
     try {
       const response = await fetch(apiBase + '/models', {
@@ -267,10 +351,14 @@ export class RepoCommandCenter {
         .map(name => ({ name }));
       if (!models.length) throw new Error('The inference endpoint returned no available models.');
       this.panel?.webview.postMessage({ command: 'ollamaModels', models, selectedModel });
+      if (!silent) {
+        this.completeProgress('loadModels', `Loaded ${models.length} model(s)`, 'ok');
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.panel?.webview.postMessage({ command: 'ollamaModels', models: [], selectedModel, error: message });
       if (!silent) {
+        this.completeProgress('loadModels', 'Failed to load models', 'bad', message);
         vscode.window.showErrorMessage('Could not load models: ' + message);
       }
     }
@@ -291,7 +379,10 @@ export class RepoCommandCenter {
       payload: {
         busy: this.busy,
         fetchingRemotes: this.fetchingRemotes,
+        batchAction: this.batchActionInFlight,
         syncingPaths: Array.from(this.syncingPaths),
+        activePathLabels: Object.fromEntries(this.activePathLabels),
+        progress: this.progress,
         lastCheckedAt: this.lastCheckedAt || null,
         lastFetchedAt: this.lastFetchedAt || null,
         showOnStartup,
@@ -316,7 +407,7 @@ export class RepoCommandCenter {
     });
   }
 
-  public async refresh() {
+  public async refresh(silentProgress = false) {
     if (!this.panel) return;
     if (this.busy) {
       this.pendingRefresh = true;
@@ -324,51 +415,100 @@ export class RepoCommandCenter {
     }
     this.busy = true;
     this.pendingRefresh = false;
+    if (!silentProgress) {
+      this.setProgress({ action: 'refresh', label: 'Scanning repositories…', detail: 'Discovering Git repositories' });
+    }
     this.postState();
     try {
-      const projectPromise = this.refreshProject().catch(() => {});
+      const projectPromise = this.refreshProject(false).catch(() => {});
       const repos = await this.scanner.scanRepositories();
       this.onReposUpdated?.(repos);
+      const gitRepos = repos.filter(r => r.syncStatus !== 'none');
+      let inspectedCount = 0;
+      const total = gitRepos.length;
+      if (!silentProgress && total > 0) {
+        this.setProgress({
+          action: 'refresh',
+          label: `Inspecting repositories (0/${total})`,
+          current: 0,
+          total,
+          percent: 10
+        });
+      }
       const inspected = await mapWithConcurrency(
-        repos.filter(r => r.syncStatus !== 'none'),
+        gitRepos,
         8,
-        inspect
+        async repo => {
+          const result = await inspect(repo);
+          inspectedCount++;
+          if (!silentProgress && total > 0) {
+            this.setProgress({
+              action: 'refresh',
+              label: `Inspecting repositories (${inspectedCount}/${total})`,
+              detail: repo.name,
+              current: inspectedCount,
+              total,
+              percent: Math.min(96, 10 + Math.round((inspectedCount / total) * 86))
+            });
+          }
+          return result;
+        }
       );
       this.repos = inspected.sort((a, b) => repoPriorityScore(b) - repoPriorityScore(a) || a.name.localeCompare(b.name));
       this.lastCheckedMs = Date.now();
       this.lastCheckedAt = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       this.postState();
       await projectPromise;
+      if (!silentProgress) {
+        this.completeProgress('refresh', `Scanned ${this.repos.length} repositories`, 'ok');
+      }
     } catch (err) {
+      if (!silentProgress) {
+        this.completeProgress('refresh', 'Repository scan failed', 'bad', errorText(err));
+      }
       vscode.window.showErrorMessage(`Command Center refresh failed: ${errorText(err)}`);
     } finally {
       this.busy = false;
       this.postState();
       if (this.pendingRefresh && this.panel) {
         this.pendingRefresh = false;
-        void this.refresh();
+        void this.refresh(silentProgress);
       }
     }
   }
 
   private async fetchAllRemotes() {
-    if (!this.panel || this.fetchingRemotes || this.busy) return;
+    if (!this.panel || this.fetchingRemotes || this.busy || this.batchActionInFlight) return;
     this.fetchingRemotes = true;
+    this.setProgress({ action: 'fetchAll', label: 'Checking remotes…', detail: 'Preparing fetch' });
     this.postState();
     try {
       const sourceRepos = this.repos.length > 0 ? this.repos : await this.scanner.scanRepositories();
-      const { fetched, failed } = await this.scanner.fetchAllRepositories(sourceRepos);
+      const { fetched, failed } = await this.scanner.fetchAllRepositories(sourceRepos, (done, total, repoName) => {
+        if (total <= 0) return;
+        this.setProgress({
+          action: 'fetchAll',
+          label: `Checking remotes (${done}/${total})`,
+          detail: repoName || 'Fetching remotes…',
+          current: done,
+          total,
+          percent: Math.min(90, Math.round((done / total) * 90))
+        });
+      });
       this.lastFetchedAt = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      this.setProgress({ action: 'fetchAll', label: 'Updating repository status…', percent: 95 });
       this.fetchingRemotes = false;
-      await this.refresh();
+      await this.refresh(true);
       const behindCount = this.repos.filter(r => r.behind > 0).length;
       const aheadCount = this.repos.filter(r => r.ahead > 0).length;
       const summary =
         behindCount || aheadCount
           ? `Checked ${fetched} remote(s): ${behindCount} behind, ${aheadCount} ahead.${failed ? ` (${failed} failed)` : ''}`
           : `Checked ${fetched} remote(s): all tracked repositories are up to date.${failed ? ` (${failed} failed)` : ''}`;
+      this.completeProgress('fetchAll', summary, failed ? 'warn' : 'ok');
       vscode.window.showInformationMessage(summary);
     } catch (err) {
+      this.completeProgress('fetchAll', 'Failed to check remotes', 'bad', errorText(err));
       vscode.window.showErrorMessage(`Failed to check remotes: ${errorText(err)}`);
     } finally {
       this.fetchingRemotes = false;
@@ -377,11 +517,13 @@ export class RepoCommandCenter {
   }
 
   private async syncAllReady() {
+    if (this.batchActionInFlight) return;
     const targets = this.repos.filter(r => r.hasUpstream && (r.behind > 0 || r.ahead > 0) && !(r.behind > 0 && r.changes > 0));
     if (targets.length === 0) {
       vscode.window.showInformationMessage('No clean repositories are ready to sync. Commit uncommitted changes first if a repository is behind.');
       return;
     }
+    this.batchActionInFlight = 'syncAll';
     const output = getGitActionsOutput();
     output.clear();
     output.appendLine(`Sync all ready repositories started at ${new Date().toLocaleString()}`);
@@ -390,42 +532,77 @@ export class RepoCommandCenter {
     const synced: string[] = [];
     const skipped: string[] = [];
     const failed: string[] = [];
+    const total = targets.length;
 
-    for (const repo of targets) {
-      this.syncingPaths.add(repo.path);
-      this.postState();
-      try {
-        const res = await this.syncSingleRepo(repo, output);
-        if (res === 'synced') synced.push(repo.name);
-        else skipped.push(repo.name);
-      } catch (e) {
-        const message = errorText(e);
-        failed.push(`${repo.name}: ${message}`);
-        output.appendLine(`Sync failed: ${message}`);
-      } finally {
-        this.syncingPaths.delete(repo.path);
+    try {
+      for (let i = 0; i < total; i++) {
+        const repo = targets[i];
+        this.syncingPaths.add(repo.path);
+        this.activePathLabels.set(repo.path, 'Syncing…');
+        this.setProgress({
+          action: 'syncAll',
+          label: `Syncing repositories (${i + 1}/${total})`,
+          detail: `${repo.name} — Fetching remote…`,
+          current: i + 1,
+          total,
+          percent: Math.round(((i + 0.1) / total) * 92)
+        });
         this.postState();
+        try {
+          const res = await this.syncSingleRepo(repo, output, (stage, fraction) => {
+            this.setProgress({
+              action: 'syncAll',
+              label: `Syncing repositories (${i + 1}/${total})`,
+              detail: `${repo.name} — ${stage}`,
+              current: i + 1,
+              total,
+              percent: Math.round(((i + fraction) / total) * 92)
+            });
+          });
+          if (res === 'synced') synced.push(repo.name);
+          else skipped.push(repo.name);
+        } catch (e) {
+          const message = errorText(e);
+          failed.push(`${repo.name}: ${message}`);
+          output.appendLine(`Sync failed: ${message}`);
+        } finally {
+          this.syncingPaths.delete(repo.path);
+          this.activePathLabels.delete(repo.path);
+          this.postState();
+        }
       }
-    }
 
-    output.appendLine('\nSync all finished.');
-    await this.refresh();
-    const details = [
-      ...(synced.length ? [`Synced ${synced.length}: ${synced.join(', ')}`] : []),
-      ...(skipped.length ? [`Up to date / skipped: ${skipped.join(', ')}`] : []),
-      ...failed.map(s => `Failed: ${s}`)
-    ].join('\n');
-    if (failed.length) vscode.window.showWarningMessage(details || 'Sync completed with errors.');
-    else vscode.window.showInformationMessage(details || 'All ready repositories synced.');
+      output.appendLine('\nSync all finished.');
+      this.setProgress({ action: 'syncAll', label: 'Refreshing repository status…', percent: 96 });
+      await this.refresh(true);
+      const details = [
+        ...(synced.length ? [`Synced ${synced.length}: ${synced.join(', ')}`] : []),
+        ...(skipped.length ? [`Up to date / skipped: ${skipped.join(', ')}`] : []),
+        ...failed.map(s => `Failed: ${s}`)
+      ].join('\n');
+      const shortSummary = failed.length
+        ? `Synced ${synced.length} of ${total} (${failed.length} failed)`
+        : `Synced ${synced.length} repositor${synced.length === 1 ? 'y' : 'ies'}`;
+      this.completeProgress('syncAll', shortSummary, failed.length ? 'warn' : 'ok');
+      if (failed.length) vscode.window.showWarningMessage(details || 'Sync completed with errors.');
+      else vscode.window.showInformationMessage(details || 'All ready repositories synced.');
+    } finally {
+      this.batchActionInFlight = null;
+      this.postState();
+    }
   }
 
-  private async refreshProject() {
+  private async refreshProject(showProgress = false) {
+    if (showProgress) {
+      this.setProgress({ action: 'refreshProject', label: 'Inspecting active workspace…', detail: 'Checking ports, tasks, and errors' });
+    }
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
       this.projectTasks = [];
       this.projectErrors = [];
       this.projectPorts = [];
       this.postState();
+      if (showProgress) this.completeProgress('refreshProject', 'No active workspace folder', 'ok');
       return;
     }
     const root = path.resolve(folder.uri.fsPath);
@@ -451,119 +628,236 @@ export class RepoCommandCenter {
     this.projectErrors = errors.slice(-20).reverse();
     this.projectPorts = await findProjectPorts(root);
     this.postState();
+    if (showProgress) {
+      this.completeProgress('refreshProject', 'Workspace status updated', 'ok');
+    }
   }
 
   private async commitAll() {
+    if (this.batchActionInFlight) return;
     const targets = this.repos.filter(r => r.changes > 0);
     if (targets.length === 0) {
       vscode.window.showInformationMessage('No repositories have uncommitted changes.');
       return;
     }
+    this.batchActionInFlight = 'commitAll';
+    const output = getGitActionsOutput();
+    output.appendLine(`\nCommit all changes started at ${new Date().toLocaleString()} (${targets.length} repo(s))`);
+
     const changed: string[] = [];
     const skipped: string[] = [];
     const failed: string[] = [];
-    for (const repo of targets) {
-      this.syncingPaths.add(repo.path);
+    const total = targets.length;
+
+    try {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Window,
+          title: 'xVSGravityTools: Committing changes'
+        },
+        async (vsProgress) => {
+          for (let i = 0; i < total; i++) {
+            const repo = targets[i];
+            const stepLabel = `Committing changes (${i + 1}/${total})`;
+            this.syncingPaths.add(repo.path);
+            this.activePathLabels.set(repo.path, 'Committing…');
+            this.setProgress({
+              action: 'commitAll',
+              label: stepLabel,
+              detail: `${repo.name} — Staging changes…`,
+              current: i + 1,
+              total,
+              percent: Math.round(((i + 0.15) / total) * 92)
+            });
+            vsProgress.report({ message: `${i + 1}/${total} · ${repo.name} (staging)` });
+            this.postState();
+            try {
+              const status = await run(repo.path, 'git', ['status', '--porcelain=v1']);
+              if (!status.trim()) {
+                skipped.push(repo.name);
+                continue;
+              }
+              await run(repo.path, 'git', ['add', '-A']);
+              const stagedDiff = await run(repo.path, 'git', ['diff', '--cached', '--no-ext-diff', '--binary']);
+              const fileDiffs = DiffAnalyzer.parseDiff(stagedDiff);
+              if (fileDiffs.length === 0) {
+                skipped.push(`${repo.name} (no committable changes)`);
+                continue;
+              }
+              this.setProgress({
+                action: 'commitAll',
+                label: stepLabel,
+                detail: `${repo.name} — Generating commit message…`,
+                current: i + 1,
+                total,
+                percent: Math.round(((i + 0.45) / total) * 92)
+              });
+              vsProgress.report({ message: `${i + 1}/${total} · ${repo.name} (generating message)` });
+              const message = await generateCommitMessage(fileDiffs);
+              this.setProgress({
+                action: 'commitAll',
+                label: stepLabel,
+                detail: `${repo.name} — Committing…`,
+                current: i + 1,
+                total,
+                percent: Math.round(((i + 0.8) / total) * 92)
+              });
+              vsProgress.report({ message: `${i + 1}/${total} · ${repo.name} (committing)` });
+              await run(repo.path, 'git', ['commit', '-m', message]);
+              changed.push(repo.name);
+              output.appendLine(`[${repo.name}] Committed: ${message.split(/\r?\n/)[0]}`);
+              this.setProgress({
+                action: 'commitAll',
+                label: stepLabel,
+                detail: `${repo.name} — Committed`,
+                current: i + 1,
+                total,
+                percent: Math.round(((i + 1) / total) * 92)
+              });
+            } catch (e) {
+              const errMsg = errorText(e);
+              failed.push(`${repo.name}: ${errMsg}`);
+              output.appendLine(`[${repo.name}] Commit failed: ${errMsg}`);
+            } finally {
+              this.syncingPaths.delete(repo.path);
+              this.activePathLabels.delete(repo.path);
+              this.postState();
+            }
+          }
+          this.setProgress({ action: 'commitAll', label: 'Refreshing repository status…', percent: 96 });
+          vsProgress.report({ message: 'Refreshing repositories…' });
+          await this.refresh(true);
+        }
+      );
+
+      const details = [
+        ...(changed.length ? [`Committed ${changed.length}: ${changed.join(', ')}`] : []),
+        ...(skipped.length ? [`Already clean: ${skipped.join(', ')}`] : []),
+        ...failed.map(s => `Failed: ${s}`)
+      ].join('\n');
+      const shortSummary = failed.length
+        ? `Committed ${changed.length} of ${total} (${failed.length} failed)`
+        : `Committed ${changed.length} repositor${changed.length === 1 ? 'y' : 'ies'}`;
+      this.completeProgress('commitAll', shortSummary, failed.length ? 'warn' : 'ok');
+      if (failed.length) vscode.window.showWarningMessage(details || 'No repositories had changes to commit.');
+      else vscode.window.showInformationMessage(details || 'All changed repositories committed successfully.');
+    } finally {
+      this.batchActionInFlight = null;
       this.postState();
-      try {
-        const status = await run(repo.path, 'git', ['status', '--porcelain=v1']);
-        if (!status.trim()) {
-          skipped.push(repo.name);
-          continue;
-        }
-        await run(repo.path, 'git', ['add', '-A']);
-        const stagedDiff = await run(repo.path, 'git', ['diff', '--cached', '--no-ext-diff', '--binary']);
-        const fileDiffs = DiffAnalyzer.parseDiff(stagedDiff);
-        if (fileDiffs.length === 0) {
-          skipped.push(`${repo.name} (no committable changes)`);
-          continue;
-        }
-        const message = await generateCommitMessage(fileDiffs);
-        await run(repo.path, 'git', ['commit', '-m', message]);
-        changed.push(repo.name);
-      } catch (e) {
-        failed.push(`${repo.name}: ${errorText(e)}`);
-      } finally {
-        this.syncingPaths.delete(repo.path);
-        this.postState();
-      }
     }
-    await this.refresh();
-    const details = [
-      ...(changed.length ? [`Committed ${changed.length}: ${changed.join(', ')}`] : []),
-      ...(skipped.length ? [`Already clean: ${skipped.join(', ')}`] : []),
-      ...failed.map(s => `Failed: ${s}`)
-    ].join('\n');
-    if (failed.length) vscode.window.showWarningMessage(details || 'No repositories had changes to commit.');
-    else vscode.window.showInformationMessage(details || 'All changed repositories committed successfully.');
   }
 
   private async pushAll() {
+    if (this.batchActionInFlight) return;
     const targets = this.repos.filter(r => r.hasUpstream && r.ahead > 0 && r.behind === 0);
     if (targets.length === 0) {
       vscode.window.showInformationMessage('No repositories have outgoing commits ready to push.');
       return;
     }
+    this.batchActionInFlight = 'pushAll';
     const pushed: string[] = [];
     const skipped: string[] = [];
     const failed: string[] = [];
+    const total = targets.length;
     const output = getGitActionsOutput();
     output.clear();
     output.appendLine(`Push outgoing commits started at ${new Date().toLocaleString()}`);
     output.show(true);
-    for (const repo of targets) {
-      this.syncingPaths.add(repo.path);
-      this.postState();
-      output.appendLine(`\n[${repo.name}] Checking upstream status...`);
-      try {
-        const status = await run(repo.path, 'git', ['status', '--porcelain=v1', '-b']);
-        const lines = status.split(/\r?\n/).filter(Boolean);
-        const header = lines[0] || '';
-        const aheadMatch = header.match(/ahead (\d+)/);
-        const behindMatch = header.match(/behind (\d+)/);
-        const ahead = Number(aheadMatch?.[1] || 0);
-        const behind = Number(behindMatch?.[1] || 0);
-        if (!header.includes('...') || ahead < 1 || behind > 0) {
-          skipped.push(repo.name);
-          output.appendLine(`Skipped: no safe outgoing commits (ahead ${ahead}, behind ${behind}).`);
-          continue;
-        }
-        output.appendLine(`Pushing ${ahead} outgoing commit(s)...`);
-        output.appendLine(`> git push --progress`);
-        await runGitWithOutput(repo.path, ['push', '--progress'], output);
-        pushed.push(repo.name);
-        output.appendLine('Push completed successfully.');
-      } catch (e) {
-        const message = errorText(e);
-        failed.push(`${repo.name}: ${message}`);
-        output.appendLine(`Push failed: ${message}`);
-      } finally {
-        this.syncingPaths.delete(repo.path);
+
+    try {
+      for (let i = 0; i < total; i++) {
+        const repo = targets[i];
+        const stepLabel = `Pushing commits (${i + 1}/${total})`;
+        this.syncingPaths.add(repo.path);
+        this.activePathLabels.set(repo.path, 'Pushing…');
+        this.setProgress({
+          action: 'pushAll',
+          label: stepLabel,
+          detail: `${repo.name} — Checking upstream status…`,
+          current: i + 1,
+          total,
+          percent: Math.round(((i + 0.2) / total) * 92)
+        });
         this.postState();
+        output.appendLine(`\n[${repo.name}] Checking upstream status...`);
+        try {
+          const status = await run(repo.path, 'git', ['status', '--porcelain=v1', '-b']);
+          const lines = status.split(/\r?\n/).filter(Boolean);
+          const header = lines[0] || '';
+          const aheadMatch = header.match(/ahead (\d+)/);
+          const behindMatch = header.match(/behind (\d+)/);
+          const ahead = Number(aheadMatch?.[1] || 0);
+          const behind = Number(behindMatch?.[1] || 0);
+          if (!header.includes('...') || ahead < 1 || behind > 0) {
+            skipped.push(repo.name);
+            output.appendLine(`Skipped: no safe outgoing commits (ahead ${ahead}, behind ${behind}).`);
+            continue;
+          }
+          this.setProgress({
+            action: 'pushAll',
+            label: stepLabel,
+            detail: `${repo.name} — Pushing ${ahead} commit(s)…`,
+            current: i + 1,
+            total,
+            percent: Math.round(((i + 0.55) / total) * 92)
+          });
+          output.appendLine(`Pushing ${ahead} outgoing commit(s)...`);
+          output.appendLine(`> git push --progress`);
+          await runGitWithOutput(repo.path, ['push', '--progress'], output);
+          pushed.push(repo.name);
+          output.appendLine('Push completed successfully.');
+          this.setProgress({
+            action: 'pushAll',
+            label: stepLabel,
+            detail: `${repo.name} — Pushed`,
+            current: i + 1,
+            total,
+            percent: Math.round(((i + 1) / total) * 92)
+          });
+        } catch (e) {
+          const message = errorText(e);
+          failed.push(`${repo.name}: ${message}`);
+          output.appendLine(`Push failed: ${message}`);
+        } finally {
+          this.syncingPaths.delete(repo.path);
+          this.activePathLabels.delete(repo.path);
+          this.postState();
+        }
       }
+      output.appendLine('\nPush action finished.');
+      this.setProgress({ action: 'pushAll', label: 'Refreshing repository status…', percent: 96 });
+      await this.refresh(true);
+      const details = [
+        ...(pushed.length ? [`Pushed ${pushed.length}: ${pushed.join(', ')}`] : []),
+        ...(skipped.length ? [`No safe outgoing commits: ${skipped.join(', ')}`] : []),
+        ...failed.map(s => `Failed: ${s}`)
+      ].join('\n');
+      const shortSummary = failed.length
+        ? `Pushed ${pushed.length} of ${total} (${failed.length} failed)`
+        : `Pushed ${pushed.length} repositor${pushed.length === 1 ? 'y' : 'ies'}`;
+      this.completeProgress('pushAll', shortSummary, failed.length ? 'warn' : 'ok');
+      if (failed.length) vscode.window.showWarningMessage(details || 'No repositories had outgoing commits to push.');
+      else vscode.window.showInformationMessage(details || 'Ready repositories pushed successfully.');
+    } finally {
+      this.batchActionInFlight = null;
+      this.postState();
     }
-    output.appendLine('\nPush action finished.');
-    await this.refresh();
-    const details = [
-      ...(pushed.length ? [`Pushed ${pushed.length}: ${pushed.join(', ')}`] : []),
-      ...(skipped.length ? [`No safe outgoing commits: ${skipped.join(', ')}`] : []),
-      ...failed.map(s => `Failed: ${s}`)
-    ].join('\n');
-    if (failed.length) vscode.window.showWarningMessage(details || 'No repositories had outgoing commits to push.');
-    else vscode.window.showInformationMessage(details || 'Ready repositories pushed successfully.');
   }
 
   public async syncSingleRepo(
     repo: { name: string; path: string },
-    output: vscode.OutputChannel
+    output: vscode.OutputChannel,
+    onStage?: (stage: string, fraction: number) => void
   ): Promise<'synced' | 'skipped' | 'up-to-date'> {
     output.appendLine(`\n[${repo.name}] Fetching remote status...`);
+    onStage?.('Fetching remote…', 0.2);
     try {
       await run(repo.path, 'git', ['fetch', '--prune'], 30000);
     } catch (e) {
       output.appendLine(`Fetch note: ${errorText(e)}`);
     }
 
+    onStage?.('Checking status…', 0.35);
     const status = await run(repo.path, 'git', ['status', '--porcelain=v1', '-b']);
     const lines = status.split(/\r?\n/).filter(Boolean);
     const header = lines[0] || '';
@@ -580,6 +874,7 @@ export class RepoCommandCenter {
 
     if (behind === 0 && ahead === 0 && !hasChanges) {
       output.appendLine(`Already up to date.`);
+      onStage?.('Up to date', 1);
       return 'up-to-date';
     }
 
@@ -591,6 +886,7 @@ export class RepoCommandCenter {
     let pulled = false;
     let pushed = false;
     if (behind > 0) {
+      onStage?.(`Pulling ${behind} commit(s)…`, 0.55);
       output.appendLine(`Pulling ${behind} incoming commit(s)...`);
       output.appendLine(`> git pull --progress`);
       await runGitWithOutput(repo.path, ['pull', '--progress'], output);
@@ -610,6 +906,7 @@ export class RepoCommandCenter {
     }
 
     if (ahead > 0 && behindAfter === 0) {
+      onStage?.(`Pushing ${ahead} commit(s)…`, 0.8);
       output.appendLine(`Pushing ${ahead} outgoing commit(s)...`);
       output.appendLine(`> git push --progress`);
       await runGitWithOutput(repo.path, ['push', '--progress'], output);
@@ -619,10 +916,12 @@ export class RepoCommandCenter {
 
     if (!pulled && !pushed) {
       output.appendLine(`Already up to date.`);
+      onStage?.('Up to date', 1);
       return 'up-to-date';
     }
 
     output.appendLine(`Sync finished successfully.`);
+    onStage?.('Synced', 1);
     return 'synced';
   }
 
@@ -634,19 +933,51 @@ export class RepoCommandCenter {
     output.appendLine(`Sync started for [${name}] at ${new Date().toLocaleString()}`);
     output.show(true);
     this.syncingPaths.add(repo.path);
+    this.activePathLabels.set(repo.path, 'Syncing…');
+    this.setProgress({ action: 'syncRepo', label: `Syncing ${name}`, detail: 'Fetching remote…', percent: 15 });
     this.postState();
     try {
-      const res = await this.syncSingleRepo(repo, output);
-      if (res === 'synced') vscode.window.showInformationMessage(`[${name}] Synced successfully.`);
-      else if (res === 'up-to-date') vscode.window.showInformationMessage(`[${name}] Already up to date.`);
-      else vscode.window.showInformationMessage(`[${name}] Skipped: No remote upstream branch tracked.`);
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Window,
+          title: `xVSGravityTools: Syncing ${name}`
+        },
+        async (vsProgress) => {
+          const res = await this.syncSingleRepo(repo, output, (stage, fraction) => {
+            this.setProgress({
+              action: 'syncRepo',
+              label: `Syncing ${name}`,
+              detail: stage,
+              percent: Math.round(fraction * 90)
+            });
+            vsProgress.report({ message: stage });
+          });
+          if (this.panel) {
+            this.setProgress({ action: 'syncRepo', label: `Syncing ${name}`, detail: 'Refreshing status…', percent: 95 });
+            await this.refresh(true);
+          }
+          if (res === 'synced') {
+            this.completeProgress('syncRepo', `[${name}] Synced`, 'ok');
+            vscode.window.showInformationMessage(`[${name}] Synced successfully.`);
+          } else if (res === 'up-to-date') {
+            this.completeProgress('syncRepo', `[${name}] Already up to date`, 'ok');
+            vscode.window.showInformationMessage(`[${name}] Already up to date.`);
+          } else {
+            this.completeProgress('syncRepo', `[${name}] No upstream branch`, 'warn');
+            vscode.window.showInformationMessage(`[${name}] Skipped: No remote upstream branch tracked.`);
+          }
+        }
+      );
     } catch (e) {
       const message = errorText(e);
       output.appendLine(`Sync failed: ${message}`);
+      this.completeProgress('syncRepo', `[${name}] Sync failed`, 'bad', message);
       vscode.window.showErrorMessage(`[${name}] Sync failed: ${message}`);
+      if (this.panel) await this.refresh(true);
     } finally {
       this.syncingPaths.delete(repo.path);
-      if (this.panel) await this.refresh();
+      this.activePathLabels.delete(repo.path);
+      this.postState();
     }
   }
 
@@ -715,11 +1046,146 @@ export class RepoCommandCenter {
   body {
     margin: 0;
     padding: clamp(14px, 2.2vw, 28px);
+    padding-bottom: 52px;
     font-family: var(--vscode-font-family, system-ui, -apple-system, sans-serif);
     font-size: 13px;
     line-height: 1.45;
     color: var(--fg);
     background: var(--bg);
+  }
+
+  /* Window-edge thin progress bars (top + bottom dock) */
+  .win-progress {
+    pointer-events: none;
+    line-height: 0;
+  }
+  .win-progress.top {
+    position: fixed;
+    inset: 0 0 auto 0;
+    z-index: 200;
+    height: 3px;
+  }
+  .win-progress.bottom {
+    width: 100%;
+    height: 2px;
+  }
+  .win-progress progress {
+    appearance: none;
+    border: 0 solid;
+    overflow: clip;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+    background: color-mix(in oklab, var(--fg) 10%, transparent);
+    container-type: inline-size;
+    --progress-bar-fill: var(--accent);
+    --progress-bar-indeterminate-size: 32%;
+    --progress-bar-indeterminate-animation-duration: 1.35s;
+  }
+  .win-progress[data-tone="ok"] progress { --progress-bar-fill: var(--ok); }
+  .win-progress[data-tone="warn"] progress { --progress-bar-fill: var(--warn); }
+  .win-progress[data-tone="bad"] progress { --progress-bar-fill: var(--bad); }
+  .win-progress progress:dir(rtl) {
+    --progress-bar-indeterminate-animation: progress-bar-indeterminate var(--progress-bar-indeterminate-animation-duration) infinite linear reverse;
+  }
+  .win-progress progress:indeterminate {
+    --progress-bar-animation: var(
+      --progress-bar-indeterminate-animation,
+      progress-bar-indeterminate var(--progress-bar-indeterminate-animation-duration) infinite linear
+    );
+  }
+  .win-progress progress::-webkit-progress-bar {
+    background: transparent;
+  }
+  .win-progress progress::-webkit-progress-value {
+    background: var(--progress-bar-fill);
+    transition: inline-size 220ms ease;
+    animation: var(--progress-bar-animation, revert-rule);
+  }
+  .win-progress progress::-moz-progress-bar {
+    background: var(--progress-bar-fill);
+    transition: inline-size 220ms ease;
+    animation: var(--progress-bar-animation, revert-rule);
+  }
+  @keyframes progress-bar-indeterminate {
+    from, to {
+      inline-size: var(--progress-bar-indeterminate-size);
+      margin-right: auto;
+    }
+    from { translate: -100%; }
+    to { translate: 100cqi; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .win-progress progress {
+      --progress-bar-indeterminate-animation-duration: 10s;
+    }
+  }
+
+  .bottom-progress-dock {
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: 200;
+    background: color-mix(in oklab, var(--surface) 94%, var(--bg));
+    border-top: 1px solid var(--border-strong);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 -4px 16px rgb(0 0 0 / 0.18);
+  }
+  .bottom-progress-dock[hidden],
+  .win-progress[hidden] {
+    display: none;
+  }
+  .progress-dock-inner {
+    max-width: 1440px;
+    margin: 0 auto;
+    padding: 7px clamp(14px, 2.2vw, 28px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    min-height: 32px;
+  }
+  .progress-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    flex: 0 0 auto;
+    background: var(--accent);
+  }
+  .bottom-progress-dock[data-tone="ok"] .progress-dot { background: var(--ok); }
+  .bottom-progress-dock[data-tone="warn"] .progress-dot { background: var(--warn); }
+  .bottom-progress-dock[data-tone="bad"] .progress-dot { background: var(--bad); }
+  .bottom-progress-dock[data-active="true"] .progress-dot {
+    animation: pulse-dot 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.45; transform: scale(0.82); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bottom-progress-dock[data-active="true"] .progress-dot { animation: none; }
+  }
+  .progress-label {
+    font-weight: 600;
+    color: var(--fg);
+    white-space: nowrap;
+  }
+  .progress-detail {
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+  .progress-meta {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  article.repo-card[data-busy="true"] {
+    border-color: color-mix(in oklab, var(--accent) 65%, var(--border));
   }
 
   .app {
@@ -1362,10 +1828,18 @@ export class RepoCommandCenter {
     .tablist [role="tab"][aria-selected="true"]::after {
       border-block-end-color: Highlight;
     }
+    .win-progress progress {
+      forced-color-adjust: none;
+      background: Canvas;
+      --progress-bar-fill: Highlight;
+    }
   }
 </style>
 </head>
 <body>
+<div class="win-progress top" id="topProgressWrap" hidden>
+  <progress id="topProgress" max="100" aria-label="Operation progress"></progress>
+</div>
 <div class="app">
   <header class="topbar">
     <div class="brand">
@@ -1580,6 +2054,18 @@ export class RepoCommandCenter {
   </main>
 </div>
 
+<div class="bottom-progress-dock" id="bottomProgressDock" hidden>
+  <div class="win-progress bottom" id="bottomProgressWrap">
+    <progress id="bottomProgress" max="100" aria-label="Operation progress"></progress>
+  </div>
+  <div class="progress-dock-inner" role="status" aria-live="polite">
+    <span class="progress-dot" id="progressDot" aria-hidden="true"></span>
+    <span class="progress-label" id="progressLabel"></span>
+    <span class="progress-detail" id="progressDetail"></span>
+    <span class="progress-meta" id="progressMeta"></span>
+  </div>
+</div>
+
 <script>
 const api = acquireVsCodeApi();
 
@@ -1597,12 +2083,71 @@ const ICONS = {
 
 const ui = {
   state: null,
+  progress: null,
   activeTab: 'tab-overview',
   filter: 'all',
   search: '',
   sort: 'priority',
   settingsHydrated: false
 };
+
+function renderProgress(p) {
+  ui.progress = p || null;
+  const topWrap = document.getElementById('topProgressWrap');
+  const topBar = document.getElementById('topProgress');
+  const bottomDock = document.getElementById('bottomProgressDock');
+  const bottomWrap = document.getElementById('bottomProgressWrap');
+  const bottomBar = document.getElementById('bottomProgress');
+  const labelEl = document.getElementById('progressLabel');
+  const detailEl = document.getElementById('progressDetail');
+  const metaEl = document.getElementById('progressMeta');
+  if (!topWrap || !topBar || !bottomDock || !bottomWrap || !bottomBar) return;
+
+  if (!p) {
+    topWrap.hidden = true;
+    bottomDock.hidden = true;
+    updateActionButtonStates(null);
+    return;
+  }
+
+  const tone = p.tone || 'accent';
+  topWrap.hidden = false;
+  bottomDock.hidden = false;
+  topWrap.dataset.tone = tone;
+  bottomWrap.dataset.tone = tone;
+  bottomDock.dataset.tone = tone;
+  bottomDock.dataset.active = String(!!p.active);
+
+  if (typeof p.percent === 'number' && Number.isFinite(p.percent)) {
+    const val = Math.max(0, Math.min(100, Math.round(p.percent)));
+    topBar.value = val;
+    bottomBar.value = val;
+    metaEl.textContent = p.active ? (val + '%') : 'Done';
+  } else {
+    topBar.removeAttribute('value');
+    bottomBar.removeAttribute('value');
+    metaEl.textContent = p.active ? 'Working…' : 'Done';
+  }
+
+  labelEl.textContent = p.label || '';
+  detailEl.textContent = p.detail || '';
+  detailEl.title = p.detail || '';
+  updateActionButtonStates(p);
+}
+
+function updateActionButtonStates(p) {
+  const isAction = (name) => !!(p && p.active && p.action === name);
+  const refreshProjectBtn = document.getElementById('refreshProjectBtn');
+  if (refreshProjectBtn) {
+    refreshProjectBtn.disabled = isAction('refreshProject');
+    refreshProjectBtn.textContent = isAction('refreshProject') ? 'Refreshing…' : 'Refresh project';
+  }
+  const loadModelsBtn = document.getElementById('loadModelsBtn');
+  if (loadModelsBtn) {
+    loadModelsBtn.disabled = isAction('loadModels');
+    loadModelsBtn.textContent = isAction('loadModels') ? 'Loading models…' : 'Test & load models';
+  }
+}
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1667,13 +2212,14 @@ function repoState(r) {
 function renderRepoCard(r, state) {
   const st = repoState(r);
   const isSyncing = state.syncingPaths.includes(r.path);
+  const activeLabel = (state.activePathLabels && state.activePathLabels[r.path]) || 'Syncing…';
   const isCurrent = state.currentRepoPath && r.path.toLowerCase() === state.currentRepoPath.toLowerCase();
 
   let syncButton = '';
-  if (!r.hasUpstream) {
+  if (isSyncing) {
+    syncButton = '<button type="button" class="sm primary" disabled><span class="spin">' + ICONS.sync + '</span> ' + esc(activeLabel) + '</button>';
+  } else if (!r.hasUpstream) {
     syncButton = '<button type="button" class="sm" disabled title="No upstream remote branch configured">Local only</button>';
-  } else if (isSyncing) {
-    syncButton = '<button type="button" class="sm primary" disabled><span class="spin">' + ICONS.sync + '</span> Syncing…</button>';
   } else if (r.behind > 0 && r.ahead > 0) {
     syncButton = '<button type="button" class="sm warn-btn" data-action="syncRepo" data-path="' + esc(r.path) + '" title="Pull incoming and push outgoing commits">' + ICONS.sync + ' Sync ↓' + r.behind + ' ↑' + r.ahead + '</button>';
   } else if (r.behind > 0) {
@@ -1698,7 +2244,7 @@ function renderRepoCard(r, state) {
   if (r.missingLicense) pills.push('<button type="button" class="sm" data-action="fix" data-issue="license" data-path="' + esc(r.path) + '">+ License</button>');
 
   return (
-    '<article class="repo-card" data-state="' + st + '">' +
+    '<article class="repo-card" data-state="' + st + '"' + (isSyncing ? ' data-busy="true"' : '') + '>' +
       '<header>' +
         '<div class="repo-id">' +
           '<div class="repo-name-row">' +
@@ -1745,12 +2291,16 @@ function renderState(state) {
   else metaParts.push('Click Check Remotes to fetch incoming commits');
   document.getElementById('brandMeta').textContent = metaParts.join(' · ');
 
+  const anyBatch = !!state.batchAction;
   const refreshBtn = document.getElementById('refreshBtn');
   const fetchBtn = document.getElementById('fetchAllBtn');
-  refreshBtn.disabled = state.busy || state.fetchingRemotes;
-  fetchBtn.disabled = state.busy || state.fetchingRemotes;
+  refreshBtn.disabled = state.busy || state.fetchingRemotes || anyBatch;
+  fetchBtn.disabled = state.busy || state.fetchingRemotes || anyBatch;
   document.getElementById('refreshLabel').textContent = state.busy ? 'Scanning…' : 'Refresh';
   document.getElementById('fetchAllLabel').textContent = state.fetchingRemotes ? 'Fetching…' : 'Check Remotes';
+  if (state.progress !== undefined) {
+    renderProgress(state.progress);
+  }
 
   // Tab badges
   const attBadge = document.getElementById('count-attention');
@@ -1802,9 +2352,9 @@ function renderState(state) {
         '</div>' +
       '</div>' +
       '<div class="banner-actions">' +
-        '<button type="button" data-action="fetchAll"' + (state.fetchingRemotes || state.busy ? ' disabled' : '') + '>' + ICONS.down + ' Check Remotes</button>' +
+        '<button type="button" data-action="fetchAll"' + (state.fetchingRemotes || state.busy || anyBatch ? ' disabled' : '') + '>' + (state.fetchingRemotes ? '<span class="spin">' + ICONS.sync + '</span> Fetching…' : ICONS.down + ' Check Remotes') + '</button>' +
         (readyToSync.length > 0
-          ? '<button type="button" class="primary" data-action="syncAll">' + ICONS.sync + ' Sync All Ready (' + readyToSync.length + ')</button>'
+          ? '<button type="button" class="primary" data-action="syncAll"' + (anyBatch || state.busy || state.fetchingRemotes ? ' disabled' : '') + '>' + (state.batchAction === 'syncAll' ? '<span class="spin">' + ICONS.sync + '</span> Syncing…' : ICONS.sync + ' Sync All Ready (' + readyToSync.length + ')') + '</button>'
           : '') +
       '</div>' +
     '</div>';
@@ -1841,21 +2391,32 @@ function renderState(state) {
   document.getElementById('attentionGrid').innerHTML = attHtml;
 
   // Batch actions
+  const batchBusy = anyBatch || state.busy || state.fetchingRemotes;
+  const syncAllLabel = state.batchAction === 'syncAll'
+    ? '<span class="spin">' + ICONS.sync + '</span> Syncing…'
+    : ICONS.sync + ' Sync ready (' + readyToSync.length + ')';
+  const commitAllLabel = state.batchAction === 'commitAll'
+    ? '<span class="spin">' + ICONS.sync + '</span> Committing…'
+    : ICONS.edit + ' Commit changed (' + dirtyRepos.length + ')';
+  const pushAllLabel = state.batchAction === 'pushAll'
+    ? '<span class="spin">' + ICONS.sync + '</span> Pushing…'
+    : ICONS.up + ' Push ready (' + readyToPush.length + ')';
+
   document.getElementById('batchActions').innerHTML =
     '<div class="action-card">' +
       '<h3>Sync all ready</h3>' +
       '<p>Fetches, pulls incoming commits, and pushes outgoing commits for clean repositories with an upstream branch.</p>' +
-      '<button type="button" class="primary" data-action="syncAll"' + (readyToSync.length ? '' : ' disabled') + '>' + ICONS.sync + ' Sync ready (' + readyToSync.length + ')</button>' +
+      '<button type="button" class="primary" data-action="syncAll"' + (readyToSync.length && !batchBusy ? '' : ' disabled') + '>' + syncAllLabel + '</button>' +
     '</div>' +
     '<div class="action-card">' +
       '<h3>Commit all changes</h3>' +
       '<p>Stages and commits each repository with uncommitted changes using Smart Commit.</p>' +
-      '<button type="button" class="primary" data-action="commitAll"' + (dirtyRepos.length ? '' : ' disabled') + '>' + ICONS.edit + ' Commit changed (' + dirtyRepos.length + ')</button>' +
+      '<button type="button" class="primary" data-action="commitAll"' + (dirtyRepos.length && !batchBusy ? '' : ' disabled') + '>' + commitAllLabel + '</button>' +
     '</div>' +
     '<div class="action-card">' +
       '<h3>Push outgoing commits</h3>' +
       '<p>Pushes repositories that are ahead of remote and have no incoming commits.</p>' +
-      '<button type="button" class="primary" data-action="pushAll"' + (readyToPush.length ? '' : ' disabled') + '>' + ICONS.up + ' Push ready (' + readyToPush.length + ')</button>' +
+      '<button type="button" class="primary" data-action="pushAll"' + (readyToPush.length && !batchBusy ? '' : ' disabled') + '>' + pushAllLabel + '</button>' +
     '</div>';
 
   // Repositories tab filters & list
@@ -2137,6 +2698,9 @@ document.getElementById('compareDiffBtn').onclick = () => {
 /* Extension messages */
 window.addEventListener('message', event => {
   const m = event.data;
+  if (m.command === 'progress') {
+    renderProgress(m.payload);
+  }
   if (m.command === 'state') {
     renderState(m.payload);
   }

@@ -52,48 +52,56 @@ export async function handleGenerateCommitMessage(
   const fallbackToUnstaged = config.get<boolean>('fallbackToUnstaged', true);
   const emojiStyle = config.get<'gitmoji' | 'simple'>('emojiStyle', 'gitmoji');
 
-  const { fileDiffs } = await gitService.getDiff(repo, fallbackToUnstaged, autoStageIfNone);
-  if (!fileDiffs || fileDiffs.length === 0) {
-    vscode.window.showInformationMessage('No changes found in Git repository.');
-    return;
-  }
-
-  const result = DiffAnalyzer.analyze(fileDiffs, { includeScope, includeBody, emojiStyle });
-  let selectedFormat = format;
-  let selectedMessage = result.conventional;
-
-  if (interactive) {
-    const chosen = await vscode.window.showQuickPick([
-      { label: 'Conventional', description: result.conventional.split('\n')[0], format: 'conventional', fallback: result.conventional },
-      { label: 'Emoji', description: result.emoji.split('\n')[0], format: 'emoji', fallback: result.emoji },
-      { label: 'Simple', description: result.simple.split('\n')[0], format: 'simple', fallback: result.simple },
-      { label: 'Detailed (with summary bullets)', description: result.detailed.split('\n')[0], format: 'detailed', fallback: result.detailed }
-    ], { placeHolder: 'Select commit message style' });
-    if (!chosen) return;
-    selectedFormat = chosen.format;
-    selectedMessage = chosen.fallback;
-  } else {
-    if (format === 'emoji') selectedMessage = result.emoji;
-    else if (format === 'simple') selectedMessage = result.simple;
-    else if (format === 'detailed') selectedMessage = result.detailed;
-    else selectedMessage = result.conventional;
-  }
-
-  const aiMessage = await generateWithOllama(
-    fileDiffs,
+  await vscode.window.withProgress(
     {
-      format: selectedFormat,
-      includeScope,
-      includeBody: selectedFormat === 'detailed' ? true : includeBody,
-      emojiStyle
+      location: vscode.ProgressLocation.SourceControl,
+      title: 'Smart Commit: Generating commit message…'
     },
-    result.body,
-    60000
-  );
-  if (aiMessage) selectedMessage = aiMessage;
+    async () => {
+      const { fileDiffs } = await gitService.getDiff(repo, fallbackToUnstaged, autoStageIfNone);
+      if (!fileDiffs || fileDiffs.length === 0) {
+        vscode.window.showInformationMessage('No changes found in Git repository.');
+        return;
+      }
 
-  gitService.setCommitMessage(repo, selectedMessage);
-  vscode.window.setStatusBarMessage(`Smart Commit: "${selectedMessage.split('\n')[0]}"`, 4000);
+      const result = DiffAnalyzer.analyze(fileDiffs, { includeScope, includeBody, emojiStyle });
+      let selectedFormat = format;
+      let selectedMessage = result.conventional;
+
+      if (interactive) {
+        const chosen = await vscode.window.showQuickPick([
+          { label: 'Conventional', description: result.conventional.split('\n')[0], format: 'conventional', fallback: result.conventional },
+          { label: 'Emoji', description: result.emoji.split('\n')[0], format: 'emoji', fallback: result.emoji },
+          { label: 'Simple', description: result.simple.split('\n')[0], format: 'simple', fallback: result.simple },
+          { label: 'Detailed (with summary bullets)', description: result.detailed.split('\n')[0], format: 'detailed', fallback: result.detailed }
+        ], { placeHolder: 'Select commit message style' });
+        if (!chosen) return;
+        selectedFormat = chosen.format;
+        selectedMessage = chosen.fallback;
+      } else {
+        if (format === 'emoji') selectedMessage = result.emoji;
+        else if (format === 'simple') selectedMessage = result.simple;
+        else if (format === 'detailed') selectedMessage = result.detailed;
+        else selectedMessage = result.conventional;
+      }
+
+      const aiMessage = await generateWithOllama(
+        fileDiffs,
+        {
+          format: selectedFormat,
+          includeScope,
+          includeBody: selectedFormat === 'detailed' ? true : includeBody,
+          emojiStyle
+        },
+        result.body,
+        60000
+      );
+      if (aiMessage) selectedMessage = aiMessage;
+
+      gitService.setCommitMessage(repo, selectedMessage);
+      vscode.window.setStatusBarMessage(`Smart Commit: "${selectedMessage.split('\n')[0]}"`, 4000);
+    }
+  );
 }
 
 /** Generate a commit message using the user's Smart Commit settings. */
